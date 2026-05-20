@@ -1,0 +1,118 @@
+name: Deploy API To Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "docs/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "vite.config.ts"
+      - "index.html"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "cloudbuild.yaml"
+      - ".env.example"
+      - ".github/workflows/deploy-cloud-run.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-kidsact-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
+      GAR_IMAGE: ${{ vars.GAR_IMAGE || 'kidspeak-family-response' }}
+      CLOUD_RUN_API_SERVICE: ${{ vars.CLOUD_RUN_API_SERVICE || 'kidspeak-family-response' }}
+
+    steps:
+      - name: Check Out Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build app
+        run: npm run build
+
+      - id: auth
+        name: Authenticate To Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set Up Gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker Auth
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Ensure Artifact Registry exists
+        run: |
+          gcloud artifacts repositories describe "${GAR_REPOSITORY}" \
+            --location "${GCP_REGION}" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "${GAR_REPOSITORY}" \
+            --repository-format docker \
+            --location "${GCP_REGION}"
+
+      - name: Compute Image URI
+        run: |
+          echo "IMAGE_URI=${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${GAR_IMAGE}:${GITHUB_SHA}" >> "${GITHUB_ENV}"
+
+      - name: Build Image
+        run: |
+          docker build \
+            --progress=plain \
+            -t "${IMAGE_URI}" \
+            .
+
+      - name: Push Image
+        run: docker push "${IMAGE_URI}"
+
+      - id: deploy
+        name: Deploy To Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.CLOUD_RUN_API_SERVICE }}
+          image: ${{ env.IMAGE_URI }}
+          flags: >-
+            --allow-unauthenticated
+            --port=8080
+            --min-instances=0
+            --memory=512Mi
+            --concurrency=80
+            --cpu=1
+            --cpu-throttling
+            --no-cpu-boost
+            --set-env-vars=NODE_ENV=production,STORAGE_PROVIDER=firebase,REQUIRE_AUTH=true,DISABLE_REAL_AI=true,USE_MOCK_TRANSCRIPTION=true,USE_GEMINI_ANALYSIS=false,USE_RULE_BASED_ANALYSIS=true,STORE_RAW_AUDIO=false,ENABLE_LIVE_COACH=false,LOG_LEVEL=info
+            ${{ vars.CLOUD_RUN_EXTRA_ARGS }}
+
+      - name: Show Service URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.url }}"

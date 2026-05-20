@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+.expo/
+.eas/
+.env
+.env.*
+!.env.example
+tsconfig.tsbuildinfo
+*.log

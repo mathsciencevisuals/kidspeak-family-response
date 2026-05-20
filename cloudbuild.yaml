@@ -1,0 +1,44 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: kidspeak-family-response
+  _ARTIFACT_REPO: kidspeak
+
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - gcloud artifacts repositories describe ${_ARTIFACT_REPO} --location=${_REGION} || gcloud artifacts repositories create ${_ARTIFACT_REPO} --repository-format=docker --location=${_REGION}
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPO}/${_SERVICE}:$SHORT_SHA
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPO}/${_SERVICE}:$SHORT_SHA
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --min-instances=0
+      - --memory=512Mi
+      - --concurrency=80
+      - --cpu=1
+      - --cpu-throttling
+      - --no-cpu-boost
+      - --allow-unauthenticated
+      - --set-env-vars=NODE_ENV=production,STORAGE_PROVIDER=firebase,REQUIRE_AUTH=true,DISABLE_REAL_AI=true,USE_MOCK_TRANSCRIPTION=true,USE_GEMINI_ANALYSIS=false,AUDIO_RETENTION_DAYS=7,LOG_LEVEL=info
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPO}/${_SERVICE}:$SHORT_SHA

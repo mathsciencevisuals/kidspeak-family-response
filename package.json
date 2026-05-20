@@ -1,0 +1,29 @@
+{
+  "name": "kidspeak-family-coach",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "api:dev": "tsx src/server/apiServer.ts",
+    "start": "tsx src/server/apiServer.ts",
+    "build": "tsc -b && vite build",
+    "test": "node --import tsx --test src/services/*.test.ts src/services/ai/*.test.ts",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "redis": "^5.12.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "tsx": "^4.22.1"
+  }
+}
