@@ -18,7 +18,7 @@ import {
   transcriptUploads,
   whitespaceLayers,
 } from "./data/mockData";
-import { getLanguageConfig, languageConfigs } from "./localisation/languages";
+import { getLanguageConfig, languageConfigs, type SupportedLanguage } from "./localisation/languages";
 import {
   getTherapistFamilySummary,
   getTherapistHome,
@@ -27,6 +27,8 @@ import {
   therapistFamilies,
   therapistSessions,
 } from "./services/therapistDashboard";
+import type { ChildAnalysis } from "./services/childCoaching";
+import type { ParentAnalysis } from "./services/parentCoaching";
 import { assessSafetyRisk, type RiskAssessment } from "./services/safetyRiskClassifier";
 import {
   audioRetentionOptions,
@@ -36,7 +38,7 @@ import {
 } from "./services/privacyControls";
 import { getCostDashboardSnapshot } from "./services/costGuardrails";
 import { getLiveCoachSettings, simulateLiveCoach } from "./services/liveCoach";
-import type { ConversationTurn } from "./types/sprint1";
+import type { ConversationNode, ConversationSession, ConversationTurn } from "./types/sprint1";
 import type { CompetitiveProduct, HistorySession, LongitudinalTrendPoint, RouteDefinition, Session } from "./types/domain";
 
 type AppRole =
@@ -56,6 +58,63 @@ type NavItem = RouteDefinition & {
 type NavGroup = {
   title: string;
   items: NavItem[];
+};
+
+type GraphAnalysisResponse = {
+  nodes: ConversationNode[];
+  confidence: "high" | "medium" | "low";
+  originalLanguage: SupportedLanguage;
+  humanReviewRecommended: boolean;
+  aiInferenceUsed: boolean;
+  cacheHit: boolean;
+  cachedBadge: string;
+  generatedAt: string;
+  analysisVersion: string;
+  regenerateAllowed: boolean;
+};
+
+type ParentAnalysisResponse = ParentAnalysis & {
+  cacheHit: boolean;
+  cachedBadge: string;
+  generatedAt: string;
+  analysisVersion: string;
+  regenerateAllowed: boolean;
+};
+
+type ChildAnalysisResponse = ChildAnalysis & {
+  cacheHit: boolean;
+  cachedBadge: string;
+  generatedAt: string;
+  analysisVersion: string;
+  regenerateAllowed: boolean;
+};
+
+type RiskAssessmentResponse = {
+  assessment: RiskAssessment;
+  cacheHit: boolean;
+  cachedBadge: string;
+  generatedAt: string;
+  analysisVersion: string;
+  normalCoachingPrimary: boolean;
+  message: string;
+};
+
+type RuntimeSessionBundle = {
+  session: ConversationSession;
+  turns: ConversationTurn[];
+  speakerTagsDetected: boolean;
+  graph: GraphAnalysisResponse | null;
+  parentAnalysis: ParentAnalysisResponse | null;
+  childAnalysis: ChildAnalysisResponse | null;
+  riskAssessment: RiskAssessmentResponse | null;
+};
+
+const runtimeSessionStoragePrefix = "kidspeak-runtime-session:";
+const runtimeLatestSessionKey = "kidspeak-runtime-latest-session";
+const apiAuthHeaders = {
+  authorization: "Bearer demo-parent-token",
+  "x-user-id": "parent_demo_1",
+  "x-user-role": "parent",
 };
 
 const demoSessionId = "session-001";
@@ -159,6 +218,77 @@ const situationOptions = [
 ];
 
 const supportedAudioFormats = "audio/webm, audio/wav, audio/mp3, audio/mpeg, audio/mp4, audio/m4a";
+
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      ...apiAuthHeaders,
+      ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json() as { error?: string };
+      if (payload.error) {
+        message = payload.error;
+      }
+    } catch {
+      // Ignore JSON parsing failures and use the HTTP status text.
+    }
+    throw new Error(message);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+function saveRuntimeSession(bundle: RuntimeSessionBundle): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(`${runtimeSessionStoragePrefix}${bundle.session.id}`, JSON.stringify(bundle));
+  window.localStorage.setItem(runtimeLatestSessionKey, bundle.session.id);
+}
+
+function loadRuntimeSession(sessionId: string): RuntimeSessionBundle | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const raw = window.localStorage.getItem(`${runtimeSessionStoragePrefix}${sessionId}`);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as RuntimeSessionBundle;
+  } catch {
+    return null;
+  }
+}
+
+function latestRuntimeSessionId(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.localStorage.getItem(runtimeLatestSessionKey);
+}
+
+function scoreRowsFromParentAnalysis(score: ParentAnalysis["score"]): Array<{ label: string; value: number }> {
+  return [
+    { label: "Validation skill", value: score.validationSkill },
+    { label: "Boundary clarity", value: score.boundaryClarity },
+    { label: "Listening quality", value: score.listeningQuality },
+    { label: "Escalation control", value: score.escalationControl },
+    { label: "Repair attempt", value: score.repairAttempt },
+    { label: "Emotional regulation", value: score.emotionalRegulation },
+  ];
+}
 
 const liveCoachPrinciples = [
   "Simulation-first.",
@@ -957,7 +1087,7 @@ function Screen({ path, role }: { path: string; role: AppRole }) {
   }
 
   if (/^\/sessions\/[^/]+\/graph$/.test(path)) {
-    return <ConversationGraphScreen />;
+    return <ConversationGraphScreen sessionId={path.split("/")[2]} />;
   }
 
   if (/^\/sessions\/[^/]+$/.test(path)) {
@@ -1206,8 +1336,15 @@ function UploadAudioScreen() {
 
 function UploadTranscriptScreen() {
   const sampleTranscript = "Parent: Why did you not finish homework?\nChild: I don't want to do it.";
+  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const [transcriptLanguage, setTranscriptLanguage] = useState<SupportedLanguage>("en-IN");
+  const [recommendationLanguage, setRecommendationLanguage] = useState<SupportedLanguage>("hi-IN");
   const [transcriptText, setTranscriptText] = useState(sampleTranscript);
   const [analysisRequested, setAnalysisRequested] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(null);
   const transcriptLineCount = transcriptText
     .split("\n")
     .map((line) => line.trim())
@@ -1217,6 +1354,82 @@ function UploadTranscriptScreen() {
   const handleTranscriptChange = (value: string) => {
     setTranscriptText(value);
     setAnalysisRequested(false);
+    setSubmitError(null);
+  };
+
+  const handleAnalyzeTranscript = async () => {
+    if (!hasTranscript) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+    setAnalysisRequested(true);
+
+    try {
+      const session = await apiJson<ConversationSession>("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          childId: selectedChildId,
+          createdByUserId: "parent_demo_1",
+          situationType: selectedSituation,
+          language: transcriptLanguage,
+          durationSeconds: 0,
+          inputMode: "transcript_upload",
+          audioStoragePath: null,
+          transcriptStatus: "uploaded",
+          riskLevel: "low",
+          overallPattern: "Transcript uploaded and waiting for analysis",
+        }),
+      });
+
+      const upload = await apiJson<{
+        turns: ConversationTurn[];
+        speakerTagsDetected: boolean;
+      }>(`/api/sessions/${session.id}/transcript/upload`, {
+        method: "POST",
+        body: JSON.stringify({
+          transcriptLanguage,
+          sourceType: "manual_paste",
+          rawText: transcriptText,
+        }),
+      });
+
+      const graph = await apiJson<GraphAnalysisResponse>(`/api/sessions/${session.id}/analysis/run`, {
+        method: "POST",
+        body: JSON.stringify({
+          languageCode: transcriptLanguage,
+          coachingLanguage: recommendationLanguage,
+        }),
+      });
+
+      const [parentAnalysis, childAnalysis, riskAssessment] = await Promise.all([
+        apiJson<ParentAnalysisResponse>(`/api/sessions/${session.id}/parent-analysis`),
+        apiJson<ChildAnalysisResponse>(`/api/sessions/${session.id}/child-analysis`),
+        apiJson<RiskAssessmentResponse>(`/api/sessions/${session.id}/risk-assessment`, {
+          method: "POST",
+          body: JSON.stringify({ geminiSafetyAnalysisEnabled: false }),
+        }),
+      ]);
+
+      const bundle: RuntimeSessionBundle = {
+        session,
+        turns: upload.turns,
+        speakerTagsDetected: upload.speakerTagsDetected,
+        graph,
+        parentAnalysis,
+        childAnalysis,
+        riskAssessment,
+      };
+
+      saveRuntimeSession(bundle);
+      setRuntimeBundle(bundle);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Transcript analysis failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -1225,10 +1438,10 @@ function UploadTranscriptScreen() {
       <section className="grid two">
         <Panel title="Paste / Upload Transcript">
           <div className="form-grid">
-            <label>Child<select>{childOptions.map((child) => <option key={child.id}>{child.label}</option>)}</select></label>
-            <label>Situation<select>{situationOptions.map((situation) => <option key={situation.id}>{situation.label}</option>)}</select></label>
-            <label>Transcript language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-            <label>Recommendation language<select defaultValue="hi-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+            <label>Child<select value={selectedChildId} onChange={(event) => setSelectedChildId(event.target.value)}>{childOptions.map((child) => <option key={child.id} value={child.id}>{child.label}</option>)}</select></label>
+            <label>Situation<select value={selectedSituation} onChange={(event) => setSelectedSituation(event.target.value as typeof situationOptions[number]["id"])}>{situationOptions.map((situation) => <option key={situation.id} value={situation.id}>{situation.label}</option>)}</select></label>
+            <label>Transcript language<select value={transcriptLanguage} onChange={(event) => setTranscriptLanguage(event.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+            <label>Recommendation language<select value={recommendationLanguage} onChange={(event) => setRecommendationLanguage(event.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
             <textarea
               className="large-input"
               placeholder="Paste transcript from Google Recorder, Samsung Recorder, iPhone transcription, WhatsApp, or manual notes."
@@ -1240,17 +1453,18 @@ function UploadTranscriptScreen() {
               <button
                 className="secondary-action"
                 type="button"
-                disabled={!hasTranscript}
-                onClick={() => setAnalysisRequested(true)}
+                disabled={!hasTranscript || isSubmitting}
+                onClick={handleAnalyzeTranscript}
               >
-                Analyze transcript
+                {isSubmitting ? "Saving and analyzing..." : "Analyze transcript"}
               </button>
               <span className="muted">
                 {hasTranscript
-                  ? "Run analysis and generate coaching without transcription cost."
+                  ? "Create a session, save turns, run analysis, and generate coaching without transcription cost."
                   : "Paste transcript text to enable analysis."}
               </span>
             </div>
+            {submitError ? <div className="warning">{submitError}</div> : null}
             <p className="muted">Uploading a transcript is faster and cheaper because AI does not need to transcribe audio.</p>
           </div>
         </Panel>
@@ -1265,13 +1479,37 @@ function UploadTranscriptScreen() {
           <MetricRow label="Transcript lines" value={String(transcriptLineCount)} />
           <MetricRow
             label="Analysis state"
-            value={!hasTranscript ? "Waiting for transcript" : analysisRequested ? "Ready to generate coaching" : "Ready for analysis"}
+            value={!hasTranscript ? "Waiting for transcript" : isSubmitting ? "Running analysis" : runtimeBundle ? "Analysis completed" : analysisRequested ? "Ready to generate coaching" : "Ready for analysis"}
           />
           {transcriptUploads.map((upload) => (
             <MetricRow key={upload.id} label={upload.source} value={upload.status} />
           ))}
         </Panel>
       </section>
+      {runtimeBundle ? (
+        <section className="grid two">
+          <Panel title="Test Outcomes">
+            <MetricRow label="Session created" value="Yes" />
+            <MetricRow label="Transcript turns saved" value={String(runtimeBundle.turns.length)} />
+            <MetricRow label="Speaker labels saved" value={runtimeBundle.speakerTagsDetected ? "Yes" : "Unknown speakers need review"} />
+            <MetricRow label="Analysis runs" value={runtimeBundle.graph ? "Yes" : "No"} />
+            <MetricRow label="Conversation graph appears" value={runtimeBundle.graph?.nodes.length ? "Yes" : "No"} />
+            <MetricRow label="Parent coaching appears" value={runtimeBundle.parentAnalysis ? "Yes" : "No"} />
+            <MetricRow label="Child coaching appears" value={runtimeBundle.childAnalysis ? "Yes" : "No"} />
+            <MetricRow label="No audio stored" value={runtimeBundle.session.audioStoragePath ? "No" : "Yes"} />
+          </Panel>
+          <Panel title="Open Results">
+            <div className="action-row">
+              <a className="button-link" href={`/sessions/${runtimeBundle.session.id}`}>Session detail</a>
+              <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/graph`}>Conversation graph</a>
+              <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/parent`}>Parent coaching</a>
+              <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/child`}>Child coaching</a>
+              <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/safety`}>Safety review</a>
+            </div>
+            <p className="muted">Session {runtimeBundle.session.id} is saved in browser state so these pages can load the uploaded results.</p>
+          </Panel>
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -1281,26 +1519,38 @@ function SessionsScreen() {
 }
 
 export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
+  const runtimeBundle = loadRuntimeSession(sessionId);
   const detail = sessionAudioUiMap[sessionId] ?? {
     inputMode: "manual_text" as const,
     audioStored: false,
     transcript: ["Transcript unavailable in demo state."],
     analysis: ["No raw audio retained."],
   };
+  const transcriptLines = runtimeBundle
+    ? runtimeBundle.turns.map((turn) => `${turn.speaker}: ${turn.text}`)
+    : detail.transcript;
+  const analysisLines = runtimeBundle
+    ? [
+      `Conversation graph nodes: ${runtimeBundle.graph?.nodes.length ?? 0}`,
+      `Parent coaching patterns: ${runtimeBundle.parentAnalysis?.patterns.join(", ") ?? "Not generated"}`,
+      `Child coaching feelings: ${runtimeBundle.childAnalysis?.feelings.join(", ") ?? "Not generated"}`,
+      runtimeBundle.session.audioStoragePath ? "Audio path exists." : "No raw audio retained.",
+    ]
+    : detail.analysis;
 
   return (
     <section className="grid two session-detail-screen">
       <Panel title="Session Detail">
         <MetricRow label="Session" value={sessionId} />
-        <MetricRow label="Input mode" value={detail.inputMode} />
-        <MetricRow label="audioStored" value={detail.audioStored ? "true" : "false"} />
+        <MetricRow label="Input mode" value={runtimeBundle?.session.inputMode ?? detail.inputMode} />
+        <MetricRow label="audioStored" value={runtimeBundle?.session.audioStoragePath ? "true" : detail.audioStored ? "true" : "false"} />
         <MetricRow label="Stored data" value="Transcript turns, labels, timestamps, analysis, consent and audit records" />
         <MetricRow label="Raw audio" value="Not stored by default" />
         <p className="muted">Transcript and analysis remain available. Raw audio playback is intentionally not shown.</p>
       </Panel>
       <Panel title="Transcript">
         <div className="timeline">
-          {detail.transcript.map((line) => (
+          {transcriptLines.map((line) => (
             <article key={line}>
               <p>{line}</p>
             </article>
@@ -1309,7 +1559,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       </Panel>
       <Panel title="Analysis">
         <ul className="check-list">
-          {detail.analysis.map((item) => <li key={item}>{item}</li>)}
+          {analysisLines.map((item) => <li key={item}>{item}</li>)}
         </ul>
       </Panel>
       <Panel title="Actions">
@@ -1407,28 +1657,37 @@ function TrendsScreen() {
   );
 }
 
-function ConversationGraphScreen() {
+function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
+  const runtimeBundle = loadRuntimeSession(sessionId ?? latestRuntimeSessionId() ?? "");
+  const nodes = runtimeBundle?.graph?.nodes ?? multilingualGraphNodes.map((node, index) => ({
+    id: `mock-node-${index + 1}`,
+    nodeType: "coaching",
+    title: node.detectedPattern,
+    originalUtterance: node.originalUtterance,
+    translatedMeaning: node.translatedMeaning,
+    originalLanguage: node.originalLanguage,
+    analysisConfidence: node.confidence,
+    recommendation: node.recommendation,
+  }));
+
   return (
     <section className="stack">
       <Panel title="Conversation Graph">
         <div className="graph">
-          <Node label="Parent request" />
-          <Node label="Child resistance" />
-          <Node label="Escalation signal" />
-          <Node label="Validation" />
-          <Node label="Repair" />
-          <Node label="Calmer close" />
+          {nodes.map((node) => (
+            <Node key={node.id} label={node.title} />
+          ))}
         </div>
       </Panel>
       <Panel title="Multilingual Node Review">
         <div className="grid three">
-          {multilingualGraphNodes.map((node) => (
-            <article className="mini-card" key={node.originalUtterance}>
-              <strong>{node.detectedPattern}</strong>
-              <MetricRow label="Original" value={node.originalUtterance} />
-              <MetricRow label="Meaning" value={node.translatedMeaning} />
-              <MetricRow label="Language" value={node.originalLanguage} />
-              <MetricRow label="Confidence" value={node.confidence} />
+          {nodes.map((node) => (
+            <article className="mini-card" key={node.id}>
+              <strong>{node.title}</strong>
+              <MetricRow label="Original" value={node.originalUtterance ?? "Not available"} />
+              <MetricRow label="Meaning" value={node.translatedMeaning ?? "Not available"} />
+              <MetricRow label="Language" value={node.originalLanguage ?? "en-IN"} />
+              <MetricRow label="Confidence" value={node.analysisConfidence ?? "low"} />
               <p>{node.recommendation}</p>
             </article>
           ))}
@@ -1443,21 +1702,31 @@ function ParentCoachingScreen() {
 }
 
 function ParentSessionCoachingScreen({ sessionId }: { sessionId: string }) {
+  const runtimeBundle = loadRuntimeSession(sessionId);
+  const parentAnalysis = runtimeBundle?.parentAnalysis;
+  const phraseComparison = parentAnalysis?.phraseComparisons[0];
+  const scoreRows = parentAnalysis ? scoreRowsFromParentAnalysis(parentAnalysis.score) : parentAnalysisMock.scores;
+
   return (
     <section className="stack">
-      <AnalysisMetaBar generatedAt="2026-05-18T10:45:00.000Z" analysisVersion="family-response-intelligence-v11" cached admin />
+      <AnalysisMetaBar generatedAt={parentAnalysis?.generatedAt ?? "2026-05-18T10:45:00.000Z"} analysisVersion={parentAnalysis?.analysisVersion ?? "family-response-intelligence-v11"} cached={Boolean(parentAnalysis?.cacheHit)} admin />
       <ProfessionalReviewBanner
-        recommended={parentAnalysisMock.reviewRecommended}
-        reason="If language suggests severe aggression, intimidation, abuse, self-harm threats, or violence, professional review is recommended and normal coaching is not shown alone."
+        recommended={parentAnalysis?.professionalReviewRecommended ?? parentAnalysisMock.reviewRecommended}
+        reason={parentAnalysis?.safetyReason ?? "If language suggests severe aggression, intimidation, abuse, self-harm threats, or violence, professional review is recommended and normal coaching is not shown alone."}
       />
       <section className="grid two">
-        <ParentPatternCard patterns={parentAnalysisMock.patterns} />
-        <ParentCoachingScoreCard scores={parentAnalysisMock.scores} />
+        <ParentPatternCard patterns={parentAnalysis?.patterns ?? parentAnalysisMock.patterns} />
+        <ParentCoachingScoreCard scores={scoreRows} />
       </section>
-      <PhraseComparisonCard {...parentAnalysisMock.phraseComparison} />
+      <PhraseComparisonCard
+        original={phraseComparison?.originalPhrase ?? parentAnalysisMock.phraseComparison.original}
+        detected={phraseComparison?.detectedPattern ?? parentAnalysisMock.phraseComparison.detected}
+        impact={phraseComparison?.impactOnChildResponse ?? parentAnalysisMock.phraseComparison.impact}
+        better={phraseComparison?.betterAlternative ?? parentAnalysisMock.phraseComparison.better}
+      />
       <ParentScriptBuilder />
       <UserTriggeredAiPanel />
-      <PracticePlanCard items={parentPracticePlan} />
+      <PracticePlanCard items={parentAnalysis?.practicePlan ?? parentPracticePlan} />
       <Panel title="Cost Controls">
         <MetricRow label="Session" value={sessionId} />
         <MetricRow label="Default script generation" value="Rule-based template" />
@@ -1473,27 +1742,30 @@ function KidSelfCoachingScreen() {
 }
 
 function ChildSessionCoachingScreen({ sessionId }: { sessionId: string }) {
+  const runtimeBundle = loadRuntimeSession(sessionId);
+  const childAnalysis = runtimeBundle?.childAnalysis;
+
   return (
     <section className="stack">
-      <AnalysisMetaBar generatedAt="2026-05-18T10:45:00.000Z" analysisVersion="family-response-intelligence-v11" cached />
+      <AnalysisMetaBar generatedAt={childAnalysis?.generatedAt ?? "2026-05-18T10:45:00.000Z"} analysisVersion={childAnalysis?.analysisVersion ?? "family-response-intelligence-v11"} cached={Boolean(childAnalysis?.cacheHit)} />
       <ReactRespondFlow />
       <section className="grid two">
-        <FeelingCards feelings={childFeelings} />
+        <FeelingCards feelings={childAnalysis?.feelings ?? childFeelings} />
         <SentenceBuilder />
       </section>
       <section className="grid five">
-        {["What happened?", "What did I feel?", "What did I say?", "Did it make the problem bigger or smaller?", "What will I try next time?"].map((prompt) => (
+        {(childAnalysis?.reflectionCards.map((card) => card.prompt) ?? ["What happened?", "What did I feel?", "What did I say?", "Did it make the problem bigger or smaller?", "What will I try next time?"]).map((prompt) => (
           <ReflectionCard key={prompt} prompt={prompt} />
         ))}
       </section>
       <Panel title="Practice Game">
         <div className="grid two">
-          {childPracticeScenarios.map((scenario) => (
+          {(childAnalysis?.practiceScenarios ?? childPracticeScenarios).map((scenario) => (
             <PracticeScenarioCard key={scenario.situation} {...scenario} />
           ))}
         </div>
       </Panel>
-      <BadgeProgress badges={kidBadges} />
+      <BadgeProgress badges={childAnalysis?.badges ?? kidBadges} />
       <Panel title="Cost Controls">
         <MetricRow label="Session" value={sessionId} />
         <MetricRow label="Uses existing turns" value="Yes" />
@@ -1552,7 +1824,8 @@ function TherapistDashboardScreen() {
 }
 
 function SafetyRiskScreen({ sessionId }: { sessionId: string }) {
-  const assessment = assessSafetyRisk(sessionId, safetyDemoTurns);
+  const runtimeBundle = loadRuntimeSession(sessionId);
+  const assessment = runtimeBundle?.riskAssessment?.assessment ?? assessSafetyRisk(sessionId, runtimeBundle?.turns ?? safetyDemoTurns);
 
   return (
     <section className="stack">
