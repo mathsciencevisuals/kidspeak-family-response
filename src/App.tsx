@@ -1062,6 +1062,11 @@ function DashboardScreen() {
 }
 
 function RecordScreen() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [sessionNote, setSessionNote] = useState("");
+  const [analysisQueued, setAnalysisQueued] = useState(false);
+  const hasTranscriptPreview = liveTranscriptPreview.length > 0;
+
   return (
     <section className="stack">
       <IntakeCards active="record" />
@@ -1076,8 +1081,24 @@ function RecordScreen() {
           <div className="recorder-surface">
             <strong>2-5 minute guided conversation</strong>
             <span>Record, send transient audio chunks to speech-to-text, then store transcript turns only.</span>
-            <button type="button">Start Recording</button>
-            <button className="danger-action" type="button">Stop and discard</button>
+            <button type="button" onClick={() => {
+              setIsRecording(true);
+              setAnalysisQueued(false);
+            }}
+            >
+              {isRecording ? "Recording in progress" : "Start Recording"}
+            </button>
+            <button
+              className="danger-action"
+              type="button"
+              disabled={!isRecording}
+              onClick={() => {
+                setIsRecording(false);
+                setAnalysisQueued(false);
+              }}
+            >
+              Stop and discard
+            </button>
           </div>
           <section className="grid two">
             <Panel title="Live Transcript Preview">
@@ -1094,10 +1115,33 @@ function RecordScreen() {
               <MetricRow label="Parent" value="Detected" />
               <MetricRow label="Child" value="Detected" />
               <MetricRow label="Unknown" value="Fallback allowed" />
+              <MetricRow label="Recording state" value={isRecording ? "Recording" : "Not recording"} />
+              <MetricRow
+                label="Analysis state"
+                value={analysisQueued ? "Ready to generate coaching" : hasTranscriptPreview ? "Ready when user finishes" : "Waiting for transcript"}
+              />
               <p className="muted">On completion, the workflow saves transcript turns only.</p>
             </Panel>
           </section>
-          <label>Session note<textarea placeholder="Add situation context. Do not add diagnosis labels." /></label>
+          <label>Session note<textarea value={sessionNote} onChange={(event) => setSessionNote(event.target.value)} placeholder="Add situation context. Do not add diagnosis labels." /></label>
+          <div className="action-row">
+            <button
+              className="secondary-action"
+              type="button"
+              disabled={!hasTranscriptPreview}
+              onClick={() => {
+                setIsRecording(false);
+                setAnalysisQueued(true);
+              }}
+            >
+              Finish and analyze session
+            </button>
+            <span className="muted">
+              {hasTranscriptPreview
+                ? "Save transcript turns and continue to coaching analysis."
+                : "Start recording to create transcript turns for analysis."}
+            </span>
+          </div>
         </div>
       </Panel>
     </section>
@@ -1106,6 +1150,7 @@ function RecordScreen() {
 
 function UploadAudioScreen() {
   const [fileMeta, setFileMeta] = useState<{ name: string; size: string; type: string } | null>(null);
+  const [uploadRequested, setUploadRequested] = useState(false);
 
   return (
     <section className="stack">
@@ -1119,9 +1164,25 @@ function UploadAudioScreen() {
             <label>Conversation language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
             <label>Phone recorder file<input type="file" accept={supportedAudioFormats} onChange={(event) => {
               const file = event.target.files?.[0];
+              setUploadRequested(false);
               setFileMeta(file ? { name: file.name, size: formatBytes(file.size), type: file.type || "unknown" } : null);
             }} /></label>
             <div className="drop-zone">Supported formats: webm, wav, mp3, mpeg, mp4, m4a</div>
+            <div className="action-row">
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={!fileMeta}
+                onClick={() => setUploadRequested(true)}
+              >
+                Upload and transcribe
+              </button>
+              <span className="muted">
+                {fileMeta
+                  ? "Create transcript turns, then continue to analysis."
+                  : "Choose an audio file to enable transcription."}
+              </span>
+            </div>
             <p className="muted">Audio max duration defaults to 5 minutes. File size is configurable by deployment.</p>
           </div>
         </Panel>
@@ -1130,6 +1191,7 @@ function UploadAudioScreen() {
           <MetricRow label="File size" value={fileMeta?.size ?? "Waiting"} />
           <MetricRow label="MIME type" value={fileMeta?.type ?? "Waiting"} />
           <MetricRow label="Estimated duration" value="Validated by API metadata" />
+          <MetricRow label="Upload state" value={!fileMeta ? "Waiting for file" : uploadRequested ? "Ready to transcribe" : "Ready for upload"} />
           <MetricRow label="AudioProcessingEvent" value="Stored without audio path" />
           <MetricRow label="audioPersisted" value="false" />
           <p className="muted">Audio deleted. Transcript saved.</p>
@@ -1144,6 +1206,18 @@ function UploadAudioScreen() {
 
 function UploadTranscriptScreen() {
   const sampleTranscript = "Parent: Why did you not finish homework?\nChild: I don't want to do it.";
+  const [transcriptText, setTranscriptText] = useState(sampleTranscript);
+  const [analysisRequested, setAnalysisRequested] = useState(false);
+  const transcriptLineCount = transcriptText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean).length;
+  const hasTranscript = transcriptText.trim().length > 0;
+
+  const handleTranscriptChange = (value: string) => {
+    setTranscriptText(value);
+    setAnalysisRequested(false);
+  };
 
   return (
     <section className="stack">
@@ -1155,19 +1229,44 @@ function UploadTranscriptScreen() {
             <label>Situation<select>{situationOptions.map((situation) => <option key={situation.id}>{situation.label}</option>)}</select></label>
             <label>Transcript language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
             <label>Recommendation language<select defaultValue="hi-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-            <textarea className="large-input" placeholder="Paste transcript from Google Recorder, Samsung Recorder, iPhone transcription, WhatsApp, or manual notes." defaultValue={sampleTranscript} />
+            <textarea
+              className="large-input"
+              placeholder="Paste transcript from Google Recorder, Samsung Recorder, iPhone transcription, WhatsApp, or manual notes."
+              value={transcriptText}
+              onChange={(event) => handleTranscriptChange(event.target.value)}
+            />
             <label>Optional transcript file<input type="file" accept=".txt,.docx,.pdf" /></label>
+            <div className="action-row">
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={!hasTranscript}
+                onClick={() => setAnalysisRequested(true)}
+              >
+                Analyze transcript
+              </button>
+              <span className="muted">
+                {hasTranscript
+                  ? "Run analysis and generate coaching without transcription cost."
+                  : "Paste transcript text to enable analysis."}
+              </span>
+            </div>
             <p className="muted">Uploading a transcript is faster and cheaper because AI does not need to transcribe audio.</p>
           </div>
         </Panel>
         <Panel title="Rule-Based Normalization">
-          <pre className="sample-block">{sampleTranscript}</pre>
+          <pre className="sample-block">{transcriptText || "Transcript preview will appear here."}</pre>
           <ul className="check-list">
             <li>Detects optional `Parent:` and `Child:` speaker tags.</li>
             <li>If speaker tags are missing, ask user to mark turns manually or explicitly opt into AI speaker inference.</li>
             <li>Creates ConversationTurn records directly and marks transcript status as transcribed.</li>
             <li>Allows immediate Run Analysis without transcription cost.</li>
           </ul>
+          <MetricRow label="Transcript lines" value={String(transcriptLineCount)} />
+          <MetricRow
+            label="Analysis state"
+            value={!hasTranscript ? "Waiting for transcript" : analysisRequested ? "Ready to generate coaching" : "Ready for analysis"}
+          />
           {transcriptUploads.map((upload) => (
             <MetricRow key={upload.id} label={upload.source} value={upload.status} />
           ))}
