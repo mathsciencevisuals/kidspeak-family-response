@@ -1441,28 +1441,127 @@ function Screen({ path, role }: { path: string; role: AppRole }) {
   }
 }
 
+function loadFamilyProfile(): { familyName: string; children: string[]; defaultSituation: string; contextNote: string } {
+  try {
+    const raw = localStorage.getItem("family_profile");
+    if (raw) return JSON.parse(raw) as { familyName: string; children: string[]; defaultSituation: string; contextNote: string };
+  } catch {}
+  return { familyName: "", children: ["", ""], defaultSituation: "homework_conflict", contextNote: "" };
+}
+
 function DashboardScreen() {
+  const [profile, setProfile] = useState(loadFamilyProfile);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const updateChild = (index: number, value: string) => {
+    setProfile((prev) => {
+      const updated = [...prev.children];
+      updated[index] = value;
+      return { ...prev, children: updated };
+    });
+    setSaved(false);
+  };
+
+  const addChild = () => setProfile((prev) => ({ ...prev, children: [...prev.children, ""] }));
+
+  const removeChild = (index: number) => setProfile((prev) => ({ ...prev, children: prev.children.filter((_, i) => i !== index) }));
+
+  const saveProfile = async () => {
+    setSaving(true);
+    setSaved(false);
+    setSaveError(null);
+    try {
+      const payload = {
+        familyId: "family-demo-1",
+        familyName: profile.familyName || "My Family",
+        children: profile.children.filter(Boolean),
+        defaultSituation: profile.defaultSituation,
+        contextNote: profile.contextNote,
+      };
+      await apiJson("/api/family-profile", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      localStorage.setItem("family_profile", JSON.stringify(profile));
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save family profile.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <section className="stack">
-      <IntakeCards />
       <section className="grid two">
-        <Panel title="Sprint 2 Intake Flow">
+        <Panel title="Family Setup">
+          {saved ? <div className="success-banner">Family profile saved.</div> : null}
+          {saveError ? <div className="warning">{saveError}</div> : null}
+          <div className="form-grid">
+            <label>Family name
+              <input type="text" value={profile.familyName} onChange={(e) => { setProfile((p) => ({ ...p, familyName: e.target.value })); setSaved(false); }} placeholder="e.g. Sharma Family" />
+            </label>
+            <label>Default situation
+              <select value={profile.defaultSituation} onChange={(e) => { setProfile((p) => ({ ...p, defaultSituation: e.target.value })); setSaved(false); }}>
+                {situationOptions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </label>
+            <label style={{ gridColumn: "1 / -1" }}>Family context note
+              <textarea value={profile.contextNote} onChange={(e) => { setProfile((p) => ({ ...p, contextNote: e.target.value })); setSaved(false); }} placeholder="Optional: describe family background, recurring challenges, therapist guidance." rows={3} />
+            </label>
+          </div>
+          <div className="form-grid" style={{ marginTop: "12px" }}>
+            <strong>Children</strong>
+            {profile.children.map((child, index) => (
+              <div key={index} style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <input type="text" value={child} onChange={(e) => updateChild(index, e.target.value)} placeholder={`Child ${index + 1} name`} style={{ flex: 1 }} />
+                {profile.children.length > 1
+                  ? <button type="button" onClick={() => removeChild(index)} style={{ padding: "4px 8px", cursor: "pointer" }}>✕</button>
+                  : null}
+              </div>
+            ))}
+            <button type="button" className="secondary-action" onClick={addChild}>+ Add child</button>
+          </div>
+          <button className="primary-action" type="button" onClick={saveProfile} disabled={saving} style={{ marginTop: "16px" }}>
+            {saving ? "Saving…" : "Save family profile"}
+          </button>
+        </Panel>
+        <Panel title="Intake Options">
           <ul className="check-list">
             <li>Record a guided 2-5 minute consented session inside the app.</li>
             <li>Upload an existing mobile phone voice recording.</li>
             <li>Paste or upload a transcript and skip transcription cost.</li>
-            <li>Run rule-based transcript normalization before any AI inference.</li>
+            <li>Rule-based analysis runs first — AI only on explicit request.</li>
           </ul>
-        </Panel>
-        <Panel title="Operating Guardrails">
-          <MetricRow label="Audio max duration" value="5 minutes default" />
-          <MetricRow label="Transcript upload" value="No transcription call" />
-          <MetricRow label="Raw audio deletion" value="After analysis or retention window" />
-          <MetricRow label="AI speaker inference" value="Off by default" />
+          <div style={{ marginTop: "12px" }}>
+            <MetricRow label="Audio max duration" value="5 minutes default" />
+            <MetricRow label="Raw audio storage" value="Disabled (STORE_RAW_AUDIO=false)" />
+            <MetricRow label="AI speaker inference" value="Off by default" />
+            <MetricRow label="AI on page load" value="No" />
+          </div>
         </Panel>
       </section>
+      <IntakeCards />
     </section>
   );
+}
+
+function parseTranscriptLines(raw: string): Array<{ speaker: string; text: string }> {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const colonIndex = line.indexOf(":");
+      if (colonIndex > 0) {
+        const speaker = line.slice(0, colonIndex).trim();
+        const text = line.slice(colonIndex + 1).trim();
+        return { speaker, text };
+      }
+      return { speaker: "Unknown", text: line };
+    });
 }
 
 function RecordScreen() {
@@ -1471,11 +1570,13 @@ function RecordScreen() {
   const [conversationLanguage, setConversationLanguage] = useState<SupportedLanguage>("en-IN");
   const [isRecording, setIsRecording] = useState(false);
   const [sessionNote, setSessionNote] = useState("");
+  const [transcriptInput, setTranscriptInput] = useState("");
   const [analysisQueued, setAnalysisQueued] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(null);
-  const hasTranscriptPreview = liveTranscriptPreview.length > 0;
+  const parsedLines = parseTranscriptLines(transcriptInput);
+  const hasTranscriptPreview = parsedLines.length > 0;
 
   const persistRecordedSession = async () => {
     if (!hasTranscriptPreview) {
@@ -1495,7 +1596,7 @@ function RecordScreen() {
           createdByUserId: "parent_demo_1",
           situationType: selectedSituation,
           language: conversationLanguage,
-          durationSeconds: liveTranscriptPreview.length * 10,
+          durationSeconds: parsedLines.length * 10,
           inputMode: "live_audio",
           audioStoragePath: null,
           transcriptStatus: "uploaded",
@@ -1507,7 +1608,7 @@ function RecordScreen() {
       await apiJson(`/api/sessions/${session.id}/turns`, {
         method: "POST",
         body: JSON.stringify({
-          turns: liveTranscriptPreview.map((line, index) => ({
+          turns: parsedLines.map((line, index) => ({
             id: `live_turn_${index + 1}`,
             speaker: line.speaker.toLowerCase() === "parent" ? "parent" : line.speaker.toLowerCase() === "child" ? "child" : "unknown",
             startTimeSec: index * 10,
@@ -1550,47 +1651,77 @@ function RecordScreen() {
           <div className="warning">Consent reminder: everyone being recorded should know the recording is happening and why.</div>
           <div className="recorder-surface">
             <strong>2-5 minute guided conversation</strong>
-            <span>Record, send transient audio chunks to speech-to-text, then store transcript turns only.</span>
-            <button type="button" onClick={() => {
-              setIsRecording(true);
-              setAnalysisQueued(false);
-            }}
-            >
-              {isRecording ? "Recording in progress" : "Start Recording"}
-            </button>
-            <button
-              className="danger-action"
-              type="button"
-              disabled={!isRecording}
-              onClick={() => {
-                setIsRecording(false);
+            <span>Start recording, then type or paste the conversation below. Each line should start with <code>Parent:</code> or <code>Child:</code> followed by what was said.</span>
+            <div className="action-row">
+              <button type="button" className={isRecording ? "secondary-action" : ""} onClick={() => {
+                setIsRecording(true);
                 setAnalysisQueued(false);
-              }}
-            >
-              Stop and discard
-            </button>
+              }}>
+                {isRecording ? "Recording in progress" : "Start Recording"}
+              </button>
+              <button
+                className="danger-action"
+                type="button"
+                disabled={!isRecording}
+                onClick={() => {
+                  setIsRecording(false);
+                  setTranscriptInput("");
+                  setAnalysisQueued(false);
+                }}
+              >
+                Stop and discard
+              </button>
+            </div>
           </div>
+          {isRecording && (
+            <label>
+              Transcript (type as the conversation happens, one line per turn)
+              <textarea
+                className="large-input"
+                placeholder={"Parent: Why did you not finish homework?\nChild: I felt stuck and did not know where to start.\nParent: Let us do one question together."}
+                value={transcriptInput}
+                onChange={(e) => setTranscriptInput(e.target.value)}
+                rows={8}
+              />
+              <small className="muted">Format: <code>Parent: text</code> or <code>Child: text</code> — one turn per line</small>
+            </label>
+          )}
+          {!isRecording && transcriptInput && (
+            <label>
+              Recorded transcript (edit before submitting)
+              <textarea
+                className="large-input"
+                value={transcriptInput}
+                onChange={(e) => setTranscriptInput(e.target.value)}
+                rows={8}
+              />
+            </label>
+          )}
           <section className="grid two">
-            <Panel title="Live Transcript Preview">
-              <div className="timeline">
-                {liveTranscriptPreview.map((line) => (
-                  <article key={`${line.speaker}-${line.text}`}>
-                    <strong>{line.speaker}</strong>
-                    <p>{line.text}</p>
-                  </article>
-                ))}
-              </div>
+            <Panel title="Transcript Preview">
+              {parsedLines.length === 0 ? (
+                <p className="muted">Start recording and type the conversation turns above.</p>
+              ) : (
+                <div className="timeline">
+                  {parsedLines.map((line, i) => (
+                    <article key={i}>
+                      <strong>{line.speaker}</strong>
+                      <p>{line.text}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
             </Panel>
-            <Panel title="Speaker Detection">
-              <MetricRow label="Parent" value="Detected" />
-              <MetricRow label="Child" value="Detected" />
-              <MetricRow label="Unknown" value="Fallback allowed" />
-              <MetricRow label="Recording state" value={isRecording ? "Recording" : "Not recording"} />
+            <Panel title="Session Status">
+              <MetricRow label="Recording state" value={isRecording ? "Recording" : "Stopped"} />
+              <MetricRow label="Turns captured" value={String(parsedLines.length)} />
+              <MetricRow label="Parent turns" value={String(parsedLines.filter((l) => l.speaker.toLowerCase() === "parent").length)} />
+              <MetricRow label="Child turns" value={String(parsedLines.filter((l) => l.speaker.toLowerCase() === "child").length)} />
               <MetricRow
                 label="Analysis state"
-                value={analysisQueued ? "Ready to generate coaching" : hasTranscriptPreview ? "Ready when user finishes" : "Waiting for transcript"}
+                value={analysisQueued ? "Ready to generate coaching" : hasTranscriptPreview ? "Ready when you finish" : "Waiting for transcript"}
               />
-              <p className="muted">On completion, the workflow saves transcript turns only.</p>
+              <p className="muted">Raw audio is not stored. Only transcript turns are saved.</p>
             </Panel>
           </section>
           <label>Session note<textarea value={sessionNote} onChange={(event) => setSessionNote(event.target.value)} placeholder="Add situation context. Do not add diagnosis labels." /></label>
@@ -1873,7 +2004,25 @@ function UploadTranscriptScreen() {
               value={transcriptText}
               onChange={(event) => handleTranscriptChange(event.target.value)}
             />
-            <label>Optional transcript file<input type="file" accept=".txt,.docx,.pdf" /></label>
+            <label>Upload transcript file (.txt)
+              <input
+                type="file"
+                accept=".txt"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = (ev) => {
+                    const text = ev.target?.result;
+                    if (typeof text === "string" && text.trim()) {
+                      handleTranscriptChange(text);
+                    }
+                  };
+                  reader.readAsText(file);
+                }}
+              />
+              <small className="muted">Accepts plain text files. Each line should be <code>Parent: text</code> or <code>Child: text</code></small>
+            </label>
             <div className="action-row">
               <button
                 className="secondary-action"
@@ -2064,13 +2213,18 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 }
 
 function HistoryScreen() {
-  const [historyItems, setHistoryItems] = useState<HistorySession[]>(historySessions);
+  const [allItems, setAllItems] = useState<HistorySession[]>(historySessions);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [filterChild, setFilterChild] = useState("");
+  const [filterSituation, setFilterSituation] = useState("");
+  const [filterLanguage, setFilterLanguage] = useState("");
+  const [filterRisk, setFilterRisk] = useState("");
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo, setFilterTo] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-
     void (async () => {
       try {
         const backendSessions = await apiJson<ConversationSession[]>("/api/sessions?familyId=family-demo-1");
@@ -2079,7 +2233,7 @@ function HistoryScreen() {
           return local ?? fetchRuntimeSessionBundle(session.id);
         }));
         if (!cancelled) {
-          setHistoryItems(bundles.map(toHistorySession).sort((a, b) => b.date.localeCompare(a.date)));
+          setAllItems(bundles.map(toHistorySession).sort((a, b) => b.date.localeCompare(a.date)));
           setError(null);
         }
       } catch (fetchError) {
@@ -2087,154 +2241,250 @@ function HistoryScreen() {
           setError(fetchError instanceof Error ? fetchError.message : "Could not load history.");
         }
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
+
+  const filteredItems = allItems.filter((session) => {
+    if (filterChild && !session.child.toLowerCase().includes(filterChild.toLowerCase())) return false;
+    if (filterSituation && !session.situation.toLowerCase().includes(filterSituation.toLowerCase())) return false;
+    if (filterLanguage && session.language !== filterLanguage) return false;
+    if (filterRisk && session.riskLevel !== filterRisk) return false;
+    if (filterFrom && session.date < filterFrom) return false;
+    if (filterTo && session.date > filterTo) return false;
+    return true;
+  });
+
+  function clearFilters() {
+    setFilterChild(""); setFilterSituation(""); setFilterLanguage("");
+    setFilterRisk(""); setFilterFrom(""); setFilterTo("");
+  }
+
+  const hasFilters = filterChild || filterSituation || filterLanguage || filterRisk || filterFrom || filterTo;
 
   return (
     <section className="stack">
       {error ? <div className="warning">{error}</div> : null}
       <Panel title="Filters">
         <section className="filter-grid">
-          <label>Child<select><option>All children</option><option>Aarav</option><option>Mira</option></select></label>
-          <label>Situation<select><option>All situations</option>{situationOptions.map((situation) => <option key={situation.id}>{situation.label}</option>)}</select></label>
-          <label>Language<select><option>All languages</option>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-          <label>Risk level<select><option>All risk levels</option><option>low</option><option>medium</option><option>high</option><option>critical</option></select></label>
-          <label>From<input type="date" defaultValue="2026-04-22" /></label>
-          <label>To<input type="date" defaultValue="2026-05-18" /></label>
+          <label>Child
+            <select value={filterChild} onChange={(e) => setFilterChild(e.target.value)}>
+              <option value="">All children</option>
+              {[...new Set(allItems.map((s) => s.child))].map((child) => <option key={child} value={child}>{child}</option>)}
+            </select>
+          </label>
+          <label>Situation
+            <select value={filterSituation} onChange={(e) => setFilterSituation(e.target.value)}>
+              <option value="">All situations</option>
+              {situationOptions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </label>
+          <label>Language
+            <select value={filterLanguage} onChange={(e) => setFilterLanguage(e.target.value)}>
+              <option value="">All languages</option>
+              {languages.map((l) => <option value={l.code} key={l.code}>{l.label}</option>)}
+            </select>
+          </label>
+          <label>Risk level
+            <select value={filterRisk} onChange={(e) => setFilterRisk(e.target.value)}>
+              <option value="">All risk levels</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+          <label>From<input type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} /></label>
+          <label>To<input type="date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} /></label>
         </section>
+        <div className="action-row">
+          {hasFilters && <button type="button" className="secondary-action" onClick={clearFilters}>Clear filters</button>}
+          <span className="muted">{filteredItems.length} of {allItems.length} sessions shown</span>
+        </div>
       </Panel>
       <Panel title="Session History">
         {loading ? <p className="muted">Loading history...</p> : null}
+        {!loading && filteredItems.length === 0 ? <p className="muted">No sessions match the current filters.</p> : null}
         <div className="history-table">
           <div className="history-header">
-            <span>Date</span>
-            <span>Child</span>
-            <span>Situation</span>
-            <span>Language</span>
-            <span>Risk</span>
-            <span>Parent focus</span>
-            <span>Child focus</span>
-            <span>Repair</span>
-            <span>Escalation</span>
-            <span>Status</span>
-            <span>Actions</span>
+            <span>Date</span><span>Child</span><span>Situation</span><span>Language</span>
+            <span>Risk</span><span>Parent focus</span><span>Child focus</span>
+            <span>Repair</span><span>Escalation</span><span>Status</span><span>Actions</span>
           </div>
-          {historyItems.map((session) => <HistorySessionRow key={session.id} session={session} />)}
+          {filteredItems.map((session) => <HistorySessionRow key={session.id} session={session} />)}
         </div>
-        <p className="muted">History uses Firestore session metrics for production. Demo data shows growth without diagnosis or blame labels.</p>
+        <p className="muted">History uses Firestore session metrics for production.</p>
       </Panel>
     </section>
   );
 }
 
 function TrendsScreen() {
-  const first = longitudinalTrendPoints[0];
-  const last = longitudinalTrendPoints[longitudinalTrendPoints.length - 1];
-  const escalationDrop = Math.round(((first.escalationRate - last.escalationRate) / first.escalationRate) * 100);
-  const triggerCounts = countTriggers(longitudinalTrendPoints);
-  const monthlyInsights = [
-    {
-      title: `Escalation risk dropped ${escalationDrop}% across recent sessions.`,
-      type: "improvement",
-      explanation: "Sessions show escalation risk reduced when repair attempts happened earlier.",
-      recommendedNextStep: "Coaching focus could be keeping the pause-before-repeat routine.",
-    },
-    {
-      title: "Validation before correction increased in recent sessions.",
-      type: "parent growth",
-      explanation: "Patterns suggest parent validation is becoming more consistent.",
-      recommendedNextStep: "Coaching focus could be one validation sentence before each instruction.",
-    },
-    {
-      title: "Child used clearer feeling words in recent sessions.",
-      type: "child growth",
-      explanation: "Sessions show clearer feeling and help-request language.",
-      recommendedNextStep: "Coaching focus could be: I feel ___ because ___. I need ___.",
-    },
+  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
+  const [trendPoints, setTrendPoints] = useState<LongitudinalTrendPoint[]>(longitudinalTrendPoints);
+  const [insights, setInsights] = useState<Array<{ title: string; type: string; explanation: string; recommendedNextStep: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const data = await apiJson<{
+          metrics: LongitudinalTrendPoint[];
+          insights: Array<{ title: string; insightType: string; explanation: string; recommendedNextStep: string }>;
+        }>(`/api/history/trends?familyId=family-demo-1&childId=${selectedChildId}`);
+        if (!cancelled) {
+          if (data.metrics.length > 0) setTrendPoints(data.metrics);
+          if (data.insights.length > 0) {
+            setInsights(data.insights.map((i) => ({
+              title: i.title,
+              type: i.insightType,
+              explanation: i.explanation,
+              recommendedNextStep: i.recommendedNextStep,
+            })));
+          }
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) setError(fetchError instanceof Error ? fetchError.message : "Could not load trends.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedChildId]);
+
+  const first = trendPoints[0];
+  const last = trendPoints[trendPoints.length - 1];
+  const escalationDrop = first && last ? Math.round(((first.escalationRate - last.escalationRate) / Math.max(first.escalationRate, 0.01)) * 100) : 0;
+  const triggerCounts = countTriggers(trendPoints);
+
+  const displayInsights = insights.length > 0 ? insights : [
+    { title: `Escalation risk changed ${escalationDrop}% across recent sessions.`, type: "improvement", explanation: "Sessions show escalation risk reduced when repair attempts happened earlier.", recommendedNextStep: "Coaching focus could be keeping the pause-before-repeat routine." },
+    { title: "Validation before correction in recent sessions.", type: "parent growth", explanation: "Patterns suggest parent validation is becoming more consistent.", recommendedNextStep: "Coaching focus could be one validation sentence before each instruction." },
+    { title: "Child used clearer feeling words in recent sessions.", type: "child growth", explanation: "Sessions show clearer feeling and help-request language.", recommendedNextStep: "Coaching focus could be: I feel ___ because ___. I need ___." },
   ];
 
   return (
     <section className="stack">
-      <section className="grid three">
-        <TrendMetricCard title="Escalation rate" previous={`${Math.round(first.escalationRate * 100)}%`} current={`${Math.round(last.escalationRate * 100)}%`} note={`Dropped ${escalationDrop}% this month`} />
-        <TrendMetricCard title="Repair attempts" previous={`${first.repairAttempts} per session`} current={`${last.repairAttempts} per session`} note="Repair attempts increased" />
-        <TrendMetricCard title="Parent validation" previous={`${first.parentValidationScore}/100`} current={`${last.parentValidationScore}/100`} note="Validation improved" />
-      </section>
+      {error ? <div className="warning">{error}</div> : null}
+      <Panel title="Trend Filters">
+        <section className="filter-grid">
+          <label>Child
+            <select value={selectedChildId} onChange={(e) => setSelectedChildId(e.target.value)}>
+              {childOptions.map((child) => <option key={child.id} value={child.id}>{child.label}</option>)}
+            </select>
+          </label>
+        </section>
+        {loading && <p className="muted">Loading trend data...</p>}
+      </Panel>
+      {first && last && (
+        <section className="grid three">
+          <TrendMetricCard title="Escalation rate" previous={`${Math.round(first.escalationRate * 100)}%`} current={`${Math.round(last.escalationRate * 100)}%`} note={`${escalationDrop > 0 ? "Dropped" : "Changed"} ${Math.abs(escalationDrop)}% this period`} />
+          <TrendMetricCard title="Repair attempts" previous={`${first.repairAttempts} per session`} current={`${last.repairAttempts} per session`} note="Repair attempts over time" />
+          <TrendMetricCard title="Parent validation" previous={`${first.parentValidationScore}/100`} current={`${last.parentValidationScore}/100`} note="Validation score trend" />
+        </section>
+      )}
       <section className="grid two">
-        <ProgressLineChart title="Escalation rate over time" points={longitudinalTrendPoints} valueKey="escalationRate" format={(value) => `${Math.round(value * 100)}%`} />
-        <ProgressLineChart title="Parent validation score over time" points={longitudinalTrendPoints} valueKey="parentValidationScore" />
-        <ProgressLineChart title="Child regulation score over time" points={longitudinalTrendPoints} valueKey="childRegulationScore" />
-        <ProgressLineChart title="Repair score over time" points={longitudinalTrendPoints} valueKey="repairScore" />
+        <ProgressLineChart title="Escalation rate over time" points={trendPoints} valueKey="escalationRate" format={(value) => `${Math.round(value * 100)}%`} />
+        <ProgressLineChart title="Parent validation score over time" points={trendPoints} valueKey="parentValidationScore" />
+        <ProgressLineChart title="Child regulation score over time" points={trendPoints} valueKey="childRegulationScore" />
+        <ProgressLineChart title="Repair score over time" points={trendPoints} valueKey="repairScore" />
       </section>
       <TriggerFrequencyChart triggerCounts={triggerCounts} />
       <section className="grid three">
-        {monthlyInsights.map((insight) => <MonthlyInsightCard key={insight.title} {...insight} />)}
+        {displayInsights.map((insight) => <MonthlyInsightCard key={insight.title} {...insight} />)}
       </section>
-      <FamilyFocusCard />
+      <FamilyFocusCard familyId="family-demo-1" childId={selectedChildId} />
     </section>
   );
 }
 
 function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
   const resolvedSessionId = sessionId ?? latestRuntimeSessionId() ?? "";
-  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(resolvedSessionId));
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() =>
+    resolvedSessionId ? loadRuntimeSession(resolvedSessionId) : null,
+  );
+  const [loading, setLoading] = useState(Boolean(resolvedSessionId));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!resolvedSessionId) {
+      setLoading(false);
       return;
     }
-
     let cancelled = false;
+    setLoading(true);
     void (async () => {
       try {
         const bundle = await fetchRuntimeSessionBundle(resolvedSessionId);
-        if (!cancelled) {
-          setRuntimeBundle(bundle);
-          setError(null);
-        }
+        if (!cancelled) { setRuntimeBundle(bundle); setError(null); }
       } catch (fetchError) {
-        if (!cancelled) {
-          setError(fetchError instanceof Error ? fetchError.message : "Could not load conversation graph.");
-        }
+        if (!cancelled) setError(fetchError instanceof Error ? fetchError.message : "Could not load conversation graph.");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [resolvedSessionId]);
+
+  if (!resolvedSessionId) {
+    return (
+      <section className="stack">
+        <Panel title="No Session Selected">
+          <p>Start a new session to see the conversation graph.</p>
+          <div className="action-row">
+            <a className="button-link" href="/upload-transcript">Upload transcript</a>
+            <a className="button-link" href="/upload-audio">Upload audio</a>
+            <a className="button-link" href="/record">Record session</a>
+          </div>
+        </Panel>
+      </section>
+    );
+  }
+
+  if (loading) {
+    return <section className="stack"><Panel title="Conversation Graph"><p className="muted">Loading session data...</p></Panel></section>;
+  }
 
   const nodes = runtimeBundle?.graph?.nodes ?? multilingualGraphNodes.map((node, index) => ({
     id: `mock-node-${index + 1}`,
-    nodeType: "coaching",
+    nodeType: "coaching" as const,
     title: node.detectedPattern,
     originalUtterance: node.originalUtterance,
     translatedMeaning: node.translatedMeaning,
     originalLanguage: node.originalLanguage,
-    analysisConfidence: node.confidence,
+    analysisConfidence: node.confidence as "high" | "medium" | "low",
     recommendation: node.recommendation,
+    sessionId: resolvedSessionId,
+    connectedNodes: [],
+    severity: undefined,
+    speaker: undefined,
   }));
 
   return (
     <section className="stack">
       {error ? <div className="warning">{error}</div> : null}
+      {!runtimeBundle?.graph && !loading && (
+        <div className="warning">Graph data not yet generated. Go to the session and run analysis first.</div>
+      )}
       <Panel title="Conversation Graph">
         <div className="graph">
           {nodes.map((node) => (
             <Node key={node.id} label={node.title} />
           ))}
         </div>
+        <div className="action-row">
+          <a className="button-link" href={`/sessions/${resolvedSessionId}`}>Session detail</a>
+          <a className="button-link" href={`/sessions/${resolvedSessionId}/parent`}>Parent coaching</a>
+          <a className="button-link" href={`/sessions/${resolvedSessionId}/safety`}>Safety review</a>
+        </div>
       </Panel>
-      <Panel title="Multilingual Node Review">
+      <Panel title="Node Details">
         <div className="grid three">
           {nodes.map((node) => (
             <article className="mini-card" key={node.id}>
@@ -2303,7 +2553,7 @@ function ParentSessionCoachingScreen({ sessionId }: { sessionId: string }) {
         better={phraseComparison?.betterAlternative ?? parentAnalysisMock.phraseComparison.better}
       />
       <ParentScriptBuilder />
-      <UserTriggeredAiPanel />
+      <UserTriggeredAiPanel sessionId={sessionId} familyId="family-demo-1" />
       <PracticePlanCard items={parentAnalysis?.practicePlan ?? parentPracticePlan} />
       <Panel title="Cost Controls">
         <MetricRow label="Session" value={sessionId} />
@@ -2663,11 +2913,11 @@ function TherapistSessionReviewScreen({ sessionId }: { sessionId: string }) {
         </Panel>
       </section>
       <section className="grid three">
-        <ProfessionalNoteForm />
-        <AssignPracticePanel />
+        <ProfessionalNoteForm sessionId={sessionId} />
+        <AssignPracticePanel sessionId={sessionId} />
         <ExportSummaryPanel review={review} />
       </section>
-      <UserTriggeredAiPanel therapist />
+      <UserTriggeredAiPanel sessionId={sessionId} familyId="family-demo-1" therapist />
     </section>
   );
 }
@@ -2693,41 +2943,158 @@ function AnalysisMetaBar({
   );
 }
 
-function UserTriggeredAiPanel({ therapist }: { therapist?: boolean }) {
+type AiOutput = { purpose: string; text: string; provider: string; cacheHit: boolean; cachedBadge: string };
+
+function UserTriggeredAiPanel({ sessionId = "session-001", familyId = "family-demo-1", therapist }: { sessionId?: string; familyId?: string; therapist?: boolean }) {
+  const [loading, setLoading] = useState<string | null>(null);
+  const [results, setResults] = useState<AiOutput[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function runAi(purpose: "deeper_insight" | "parent_script" | "therapist_summary") {
+    setLoading(purpose);
+    setError(null);
+    try {
+      const result = await apiJson<AiOutput>(`/api/sessions/${sessionId}/ai/personalize`, {
+        method: "POST",
+        body: JSON.stringify({ purpose, familyId, childAgeRange: "9-12" }),
+      });
+      setResults((prev) => {
+        const without = prev.filter((r) => r.purpose !== purpose);
+        return [...without, result];
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI generation failed.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   return (
     <Panel title="Optional AI Personalization">
+      {error ? <div className="warning">{error}</div> : null}
       <div className="action-row">
-        <button className="secondary-action" type="button">Generate deeper insight</button>
-        <button className="secondary-action" type="button">Create personalized parent script</button>
-        {therapist ? <button className="secondary-action" type="button">Create therapist summary</button> : null}
+        <button className="secondary-action" type="button" disabled={Boolean(loading)} onClick={() => void runAi("deeper_insight")}>
+          {loading === "deeper_insight" ? "Generating..." : "Generate deeper insight"}
+        </button>
+        <button className="secondary-action" type="button" disabled={Boolean(loading)} onClick={() => void runAi("parent_script")}>
+          {loading === "parent_script" ? "Generating..." : "Generate personalized parent script"}
+        </button>
+        {therapist && (
+          <button className="secondary-action" type="button" disabled={Boolean(loading)} onClick={() => void runAi("therapist_summary")}>
+            {loading === "therapist_summary" ? "Generating..." : "Create therapist summary"}
+          </button>
+        )}
       </div>
-      <p className="muted">These are user-triggered, rate-limited, cached by input hash, and never run automatically on page load.</p>
+      {results.map((result) => (
+        <article className="mini-card" key={result.purpose}>
+          <div className="action-row">
+            <strong>{result.purpose.replaceAll("_", " ")}</strong>
+            <span className={`cache-badge ${result.cacheHit ? "cached" : ""}`}>{result.cachedBadge}</span>
+            <span className="muted">{result.provider}</span>
+          </div>
+          <p>{result.text}</p>
+        </article>
+      ))}
+      <p className="muted">User-triggered, rate-limited, cached by input hash. Not run automatically on page load.</p>
     </Panel>
   );
 }
 
-function ProfessionalNoteForm() {
+function ProfessionalNoteForm({ sessionId = "session-001" }: { sessionId?: string }) {
+  const [note, setNote] = useState("");
+  const [formulation, setFormulation] = useState("");
+  const [practice, setPractice] = useState("");
+  const [followUpDate, setFollowUpDate] = useState("");
+  const [visibility, setVisibility] = useState("private_to_therapist");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function saveNote() {
+    if (!note.trim()) return;
+    setSaving(true); setError(null); setSaved(false);
+    try {
+      await apiJson(`/api/therapist/sessions/${sessionId}/notes`, {
+        method: "POST",
+        headers: { "x-user-id": "user_therapist_1", "x-user-role": "therapist" },
+        body: JSON.stringify({ note, formulation, recommendedPractice: practice, followUpDate, visibility }),
+      });
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save note.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Panel title="Professional Note">
+      {error ? <div className="warning">{error}</div> : null}
+      {saved ? <div className="success-banner">Note saved.</div> : null}
       <div className="form-grid">
-        <label>Note<textarea defaultValue="Observed correction-before-connection pattern and later repair attempt." /></label>
-        <label>Formulation / observation<textarea defaultValue="Homework trigger escalated until the request became smaller and validation was added." /></label>
-        <label>Recommended home practice<textarea defaultValue="One validation sentence before correction for the next seven days." /></label>
-        <label>Follow-up date<input type="date" defaultValue="2026-05-25" /></label>
-        <label>Visibility<select defaultValue="private_to_therapist"><option value="private_to_therapist">Private to therapist</option><option value="shared_with_parent">Shared with parent</option></select></label>
+        <label>Note<textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Observed patterns and clinical observations." /></label>
+        <label>Formulation / observation<textarea value={formulation} onChange={(e) => setFormulation(e.target.value)} placeholder="How the situation escalated and what helped repair it." /></label>
+        <label>Recommended home practice<textarea value={practice} onChange={(e) => setPractice(e.target.value)} placeholder="One validation sentence before correction for the next seven days." /></label>
+        <label>Follow-up date<input type="date" value={followUpDate} onChange={(e) => setFollowUpDate(e.target.value)} /></label>
+        <label>Visibility
+          <select value={visibility} onChange={(e) => setVisibility(e.target.value)}>
+            <option value="private_to_therapist">Private to therapist</option>
+            <option value="shared_with_parent">Shared with parent</option>
+          </select>
+        </label>
       </div>
+      <button className="secondary-action" type="button" disabled={!note.trim() || saving} onClick={() => void saveNote()}>
+        {saving ? "Saving..." : "Save note"}
+      </button>
     </Panel>
   );
 }
 
-function AssignPracticePanel() {
+function AssignPracticePanel({ sessionId = "session-001" }: { sessionId?: string }) {
+  const [practiceType, setPracticeType] = useState("parent_validation_practice");
+  const [instructions, setInstructions] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function assignPractice() {
+    setSaving(true); setError(null); setSaved(false);
+    try {
+      await apiJson(`/api/therapist/sessions/${sessionId}/assign-practice`, {
+        method: "POST",
+        headers: { "x-user-id": "user_therapist_1", "x-user-role": "therapist" },
+        body: JSON.stringify({ practiceType, instructions, dueDate }),
+      });
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not assign practice.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Panel title="Assign Practice">
+      {error ? <div className="warning">{error}</div> : null}
+      {saved ? <div className="success-banner">Practice assigned.</div> : null}
       <div className="form-grid">
-        <label>Practice type<select defaultValue="parent_validation_practice"><option value="parent_validation_practice">Parent validation practice</option><option value="child_feeling_sentence_practice">Child feeling sentence practice</option><option value="calm_boundary_practice">Calm boundary practice</option><option value="repair_conversation_practice">Repair conversation practice</option><option value="screen_time_agreement">Screen-time agreement</option><option value="homework_start_routine">Homework start routine</option></select></label>
-        <label>Instructions<textarea defaultValue="Practice Observe -> Validate -> Boundary -> Small Next Step during homework start." /></label>
-        <label>Due date<input type="date" defaultValue="2026-05-25" /></label>
+        <label>Practice type
+          <select value={practiceType} onChange={(e) => setPracticeType(e.target.value)}>
+            <option value="parent_validation_practice">Parent validation practice</option>
+            <option value="child_feeling_sentence_practice">Child feeling sentence practice</option>
+            <option value="calm_boundary_practice">Calm boundary practice</option>
+            <option value="repair_conversation_practice">Repair conversation practice</option>
+            <option value="screen_time_agreement">Screen-time agreement</option>
+            <option value="homework_start_routine">Homework start routine</option>
+          </select>
+        </label>
+        <label>Instructions<textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Practice Observe → Validate → Boundary → Small Next Step during homework start." /></label>
+        <label>Due date<input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></label>
       </div>
+      <button className="secondary-action" type="button" disabled={saving} onClick={() => void assignPractice()}>
+        {saving ? "Assigning..." : "Assign practice"}
+      </button>
     </Panel>
   );
 }
@@ -2755,16 +3122,52 @@ function TrendBars({ values, suffix }: { values: number[]; suffix: string }) {
 
 function LocalisationScreen() {
   const hindiConfig = getLanguageConfig("hi-IN");
+  const [uiLang, setUiLang] = useState<SupportedLanguage>("en-IN");
+  const [transcriptLang, setTranscriptLang] = useState<SupportedLanguage>("en-IN");
+  const [recoLang, setRecoLang] = useState<SupportedLanguage>("hi-IN");
+  const [childLevel, setChildLevel] = useState("preteen");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setSaved(false);
+    setSaveError(null);
+    try {
+      await apiJson("/api/language-preferences", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          userId: "parent_demo_1",
+          preferredLanguage: uiLang,
+          transcriptLanguage: transcriptLang,
+          coachingLanguage: recoLang,
+          recommendationLanguage: recoLang,
+          uiLanguage: uiLang,
+          childFriendlyLanguageLevel: childLevel,
+        }),
+      });
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save preferences.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <section className="grid two">
       <Panel title="Language Settings">
+        {saved ? <div className="success-banner">Preferences saved.</div> : null}
+        {saveError ? <div className="warning">{saveError}</div> : null}
         <div className="form-grid">
-          <label>UI language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-          <label>Transcript language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-          <label>Recommendation language<select defaultValue="hi-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
-          <label>Child-friendly language level<select defaultValue="preteen"><option value="early_reader">Early reader</option><option value="preteen">Preteen</option><option value="teen">Teen</option><option value="plain">Plain family language</option></select></label>
+          <label>UI language<select value={uiLang} onChange={(e) => setUiLang(e.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+          <label>Transcript language<select value={transcriptLang} onChange={(e) => setTranscriptLang(e.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+          <label>Recommendation language<select value={recoLang} onChange={(e) => setRecoLang(e.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+          <label>Child-friendly language level<select value={childLevel} onChange={(e) => setChildLevel(e.target.value)}><option value="early_reader">Early reader</option><option value="preteen">Preteen</option><option value="teen">Teen</option><option value="plain">Plain family language</option></select></label>
         </div>
+        <button className="primary-action" type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save preferences"}</button>
       </Panel>
       <Panel title="Localisation Policy">
         <MetricRow label="Initial languages" value="English India, Hindi India, Telugu India, Tamil India" />
@@ -6830,16 +7233,59 @@ function MonthlyInsightCard({
   );
 }
 
-function FamilyFocusCard() {
+function FamilyFocusCard({ familyId = "family-demo-1", childId = "child_demo_1" }: { familyId?: string; childId?: string }) {
+  const [loading, setLoading] = useState(false);
+  const [insight, setInsight] = useState<{ focusSuggestion?: string; topTriggers?: string[]; periodLabel?: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function generateInsight() {
+    setLoading(true);
+    setError(null);
+    try {
+      const now = new Date();
+      const start = new Date(now);
+      start.setDate(now.getDate() - 28);
+      const data = await apiJson<{ snapshot: { topTriggers: string[] }; insights: Array<{ title: string }> }>("/api/history/generate-trend-snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId,
+          childId,
+          periodType: "monthly",
+          periodStart: start.toISOString(),
+          periodEnd: now.toISOString(),
+        }),
+      });
+      setInsight({
+        focusSuggestion: data.insights[0]?.title ?? "Keep homework starts small: one validation sentence, one clear boundary, one next step.",
+        topTriggers: data.snapshot?.topTriggers ?? [],
+        periodLabel: `${start.toLocaleDateString()} – ${now.toLocaleDateString()}`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not generate insight.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <Panel title="Recommended Next Family Focus">
-      <p>Keep homework starts small: one validation sentence, one clear boundary, and one next step.</p>
-      <button className="secondary-action" type="button">Generate deeper family insight</button>
-      <MetricRow label="Most improved skill" value="Validation before instruction" />
-      <MetricRow label="Sessions represented" value="8 sessions over 4 weeks" />
-      <MetricRow label="BigQuery" value="Not used in MVP" />
+      {insight ? (
+        <>
+          <p>{insight.focusSuggestion}</p>
+          {insight.topTriggers && insight.topTriggers.length > 0 && (
+            <div className="tag-row">{insight.topTriggers.map((t) => <span key={t}>{t}</span>)}</div>
+          )}
+          <MetricRow label="Period" value={insight.periodLabel ?? ""} />
+        </>
+      ) : (
+        <p className="muted">Click below to generate a deeper family focus insight from recent session data.</p>
+      )}
+      {error ? <div className="warning">{error}</div> : null}
+      <button className="secondary-action" type="button" onClick={() => void generateInsight()} disabled={loading}>
+        {loading ? "Generating..." : insight ? "Regenerate insight" : "Generate deeper family insight"}
+      </button>
       <MetricRow label="Source collection" value="SessionMetric / FamilyTrendSnapshot" />
-      <p className="muted">Default insights are deterministic from stored SessionMetric records. Gemini should run only after this click and reuse cached output.</p>
+      <p className="muted">Insight is deterministic from stored session metrics. Not an AI diagnosis.</p>
     </Panel>
   );
 }
@@ -7000,10 +7446,22 @@ function SentenceBuilder() {
 }
 
 function ReflectionCard({ prompt }: { prompt: string }) {
+  const [text, setText] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const save = () => {
+    if (!text.trim()) return;
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
   return (
     <article className="reflection-card">
       <strong>{prompt}</strong>
-      <textarea placeholder="Write or say a short answer." />
+      <textarea value={text} onChange={(e) => { setText(e.target.value); setSaved(false); }} placeholder="Write a short answer." />
+      {saved
+        ? <span className="muted">Saved ✓</span>
+        : <button className="secondary-action" type="button" onClick={save} disabled={!text.trim()}>Save</button>}
     </article>
   );
 }

@@ -284,6 +284,20 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return json(response, 200, analyzeLiveCoachChunk(body));
   }
 
+  if (method === "POST" && path === "/api/family-profile") {
+    const body = await readJson(request) as Record<string, unknown>;
+    const familyId = String(body.familyId ?? "family-demo-1");
+    await storage.setJson(`family:profile:${familyId}`, body);
+    return json(response, 200, { ok: true, familyId, ...body });
+  }
+
+  if (method === "GET" && /^\/api\/family-profile\/[^/]+$/.test(path)) {
+    const familyId = path.split("/").at(-1)!;
+    const profile = await storage.getJson<Record<string, unknown>>(`family:profile:${familyId}`);
+    if (!profile) return json(response, 404, { error: "Family profile not found" });
+    return json(response, 200, profile);
+  }
+
   if (method === "POST" && path === "/api/sessions") {
     const body = await readJson(request);
     const created = await repository.createSession(createSessionSchema.parse(body));
