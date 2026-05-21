@@ -225,6 +225,37 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return json(response, 200, { events, count: events.length });
   }
 
+  if (method === "POST" && path === "/api/admin/language-phrases") {
+    const body = await readJson(request) as Record<string, unknown>;
+    await storage.setJson(`admin:language-phrase:${String(body.id ?? Date.now())}`, body);
+    return json(response, 200, { ok: true, ...body });
+  }
+
+  if (method === "POST" && path === "/api/admin/safety-rules") {
+    const body = await readJson(request) as Record<string, unknown>;
+    await storage.setJson(`admin:safety-rule:${String(body.id ?? Date.now())}`, body);
+    return json(response, 200, { ok: true, ...body });
+  }
+
+  if (method === "POST" && path === "/api/admin/consent-templates") {
+    const body = await readJson(request) as Record<string, unknown>;
+    await storage.setJson(`admin:consent-template:${String(body.id ?? Date.now())}`, body);
+    return json(response, 200, { ok: true, ...body });
+  }
+
+  if (method === "POST" && path === "/api/admin/cost-limits") {
+    const body = await readJson(request) as Record<string, unknown>;
+    await storage.setJson("admin:cost-limits", body);
+    return json(response, 200, { ok: true, ...body });
+  }
+
+  if (method === "POST" && path === "/api/privacy/retention-settings") {
+    const body = await readJson(request) as Record<string, unknown>;
+    const familyId = String(body.familyId ?? "family-demo-1");
+    await storage.setJson(`privacy:retention:${familyId}`, body);
+    return json(response, 200, { ok: true, ...body });
+  }
+
   if (method === "POST" && path === "/api/strategy/generate-gtm-plan") {
     const body = gtmPlanPayloadSchema.parse(await readJson(request));
     const inputHash = createInputHash({

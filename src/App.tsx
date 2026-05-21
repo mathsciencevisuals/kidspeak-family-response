@@ -2580,7 +2580,7 @@ function ParentSessionCoachingScreen({ sessionId }: { sessionId: string }) {
         impact={phraseComparison?.impactOnChildResponse ?? parentAnalysisMock.phraseComparison.impact}
         better={phraseComparison?.betterAlternative ?? parentAnalysisMock.phraseComparison.better}
       />
-      <ParentScriptBuilder />
+      <ParentScriptBuilder sessionId={sessionId} />
       <UserTriggeredAiPanel sessionId={sessionId} familyId="family-demo-1" />
       <PracticePlanCard items={parentAnalysis?.practicePlan ?? parentPracticePlan} />
       <Panel title="Cost Controls">
@@ -2966,7 +2966,7 @@ function AnalysisMetaBar({
       <span className={cached ? "cache-badge cached" : "cache-badge"}>{cached ? "Cached" : "Generated"}</span>
       <span>Generated {new Date(generatedAt).toLocaleString()}</span>
       <span>{analysisVersion}</span>
-      {admin ? <button type="button">Regenerate</button> : null}
+      {admin ? <button type="button" onClick={() => window.location.reload()}>Regenerate</button> : null}
     </div>
   );
 }
@@ -3413,24 +3413,38 @@ function ConsentSettingsScreen() {
 }
 
 function DataRetentionScreen() {
+  const [audioOption, setAudioOption] = useState(audioRetentionOptions[0]);
+  const [transcriptOption, setTranscriptOption] = useState(transcriptRetentionOptions[0]);
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    await apiJson("/api/privacy/retention-settings", {
+      method: "POST",
+      body: JSON.stringify({ familyId: "family-demo-1", audioRetention: audioOption, transcriptRetention: transcriptOption }),
+    }).catch(() => {});
+    setSaved(true); setTimeout(() => setSaved(false), 2500);
+  };
+
   return (
     <section className="grid two">
       <Panel title="Audio Retention Settings">
+        {saved ? <div className="success-banner">Retention settings saved.</div> : null}
         <div className="form-grid">
-          {audioRetentionOptions.map((option, index) => (
+          {audioRetentionOptions.map((option) => (
             <label className="radio-row" key={option}>
-              <input type="radio" name="audio-retention" defaultChecked={index === 0} />
+              <input type="radio" name="audio-retention" checked={audioOption === option} onChange={() => { setAudioOption(option); setSaved(false); }} />
               <span>{option}</span>
             </label>
           ))}
         </div>
         <p className="muted">Default: no raw-audio storage. If STORE_RAW_AUDIO is explicitly enabled later, GCS lifecycle deletes objects under raw-audio/ after AUDIO_RETENTION_DAYS.</p>
+        <button className="primary-action" type="button" onClick={save}>Save retention settings</button>
       </Panel>
       <Panel title="Transcript Retention Settings">
         <div className="form-grid">
-          {transcriptRetentionOptions.map((option, index) => (
+          {transcriptRetentionOptions.map((option) => (
             <label className="radio-row" key={option}>
-              <input type="radio" name="transcript-retention" defaultChecked={index === 0} />
+              <input type="radio" name="transcript-retention" checked={transcriptOption === option} onChange={() => { setTranscriptOption(option); setSaved(false); }} />
               <span>{option}</span>
             </label>
           ))}
@@ -3853,7 +3867,13 @@ function TherapistProgressReportsScreen() {
           </ul>
         </Panel>
         <Panel title="Export Summary">
-          <button className="secondary-action" type="button">Export summary button</button>
+          <button className="secondary-action" type="button" onClick={() => {
+            const summary = createExportSummary(report.recentSessions[0]?.id ?? "session-001");
+            const text = `Progress Report\nGenerated: ${summary.generatedAt}\nSession: ${summary.sessionId}\nSituation: ${summary.situation}\n\nObserved Patterns:\n${summary.observedPatterns.join("\n")}\n\nCoaching Suggestions:\n${summary.coachingSuggestions.join("\n")}\n\nPractice Plan:\n${summary.practicePlan.join("\n")}\n\n${summary.disclaimer}`;
+            const blob = new Blob([text], { type: "text/plain" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a"); a.href = url; a.download = `progress-report-${new Date().toISOString().slice(0,10)}.txt`; a.click(); URL.revokeObjectURL(url);
+          }}>Export summary</button>
           <p className="muted">{createExportSummary(report.recentSessions[0]?.id ?? "session-001").disclaimer}</p>
         </Panel>
       </section>
@@ -4017,14 +4037,33 @@ function AdminUsersModule({ role }: { role: AppRole }) {
   const canEdit = role === "super_admin";
   const [users, setUsers] = useState<UserAdminRecord[]>(adminUsersDemo);
   const [breakGlassReason, setBreakGlassReason] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const adminHeaders = { "x-user-id": "user_super_admin_1", "x-user-role": role };
 
-  function suspendUser(id: string) {
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<{ users: UserAdminRecord[] }>("/api/admin/users", { headers: adminHeaders });
+        if (!cancelled) { setUsers(data.users.length > 0 ? data.users : adminUsersDemo); setLoadError(null); }
+      } catch { if (!cancelled) setLoadError("Could not load users from server — showing demo data."); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function suspendUser(id: string) {
     if (!canEdit) return;
-    setUsers((current) => current.map((u) => u.id === id ? { ...u, status: "suspended" as const } : u));
+    try {
+      await apiJson(`/api/admin/users/${id}/suspend`, { method: "POST", headers: adminHeaders });
+      setUsers((current) => current.map((u) => u.id === id ? { ...u, status: "suspended" as const } : u));
+    } catch { setLoadError("Could not suspend user."); }
   }
 
-  function activateUser(id: string) {
+  async function activateUser(id: string) {
     if (!canEdit) return;
+    try {
+      await apiJson(`/api/admin/users/${id}/suspend`, { method: "DELETE", headers: adminHeaders });
+    } catch {}
     setUsers((current) => current.map((u) => u.id === id ? { ...u, status: "active" as const } : u));
   }
 
@@ -4033,6 +4072,7 @@ function AdminUsersModule({ role }: { role: AppRole }) {
 
   return (
     <section className="stack">
+      {loadError ? <div className="warning">{loadError}</div> : null}
       <section className="grid three">
         <Panel title="User Summary">
           <MetricRow label="Total users" value={String(users.length)} />
@@ -4097,7 +4137,20 @@ function AdminUsersModule({ role }: { role: AppRole }) {
 
 function AdminFamiliesModule({ role }: { role: AppRole }) {
   const canView = role === "super_admin" || role === "clinical_admin";
-  const families = adminFamiliesDemo;
+  const [families, setFamilies] = useState<FamilyAdminRecord[]>(adminFamiliesDemo);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canView) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<{ families: FamilyAdminRecord[] }>("/api/admin/families", { headers: { "x-user-id": "user_super_admin_1", "x-user-role": role } });
+        if (!cancelled) { setFamilies(data.families.length > 0 ? data.families : adminFamiliesDemo); setLoadError(null); }
+      } catch { if (!cancelled) setLoadError("Could not load families — showing demo data."); }
+    })();
+    return () => { cancelled = true; };
+  }, [canView]);
 
   const noAudioCount = families.filter((f) => f.audioStoredCount === 0).length;
   const consentedCount = families.filter((f) => f.consentStatus === "all_granted").length;
@@ -4114,6 +4167,7 @@ function AdminFamiliesModule({ role }: { role: AppRole }) {
 
   return (
     <section className="stack">
+      {loadError ? <div className="warning">{loadError}</div> : null}
       <section className="grid four">
         <Panel title="Families">
           <MetricRow label="Total families" value={String(families.length)} />
@@ -4165,7 +4219,19 @@ function AdminFamiliesModule({ role }: { role: AppRole }) {
 
 function AdminTherapistsModule({ role }: { role: AppRole }) {
   const canEdit = role === "super_admin";
-  const therapists = adminTherapistsDemo;
+  const [therapists, setTherapists] = useState<TherapistAdminRecord[]>(adminTherapistsDemo);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<{ therapists: TherapistAdminRecord[] }>("/api/admin/therapists", { headers: { "x-user-id": "user_super_admin_1", "x-user-role": role } });
+        if (!cancelled) { setTherapists(data.therapists.length > 0 ? data.therapists : adminTherapistsDemo); setLoadError(null); }
+      } catch { if (!cancelled) setLoadError("Could not load therapists — showing demo data."); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const activeCount = therapists.filter((t) => t.status === "active").length;
   const verifiedCount = therapists.filter((t) => t.licenseVerified).length;
@@ -4173,6 +4239,7 @@ function AdminTherapistsModule({ role }: { role: AppRole }) {
 
   return (
     <section className="stack">
+      {loadError ? <div className="warning">{loadError}</div> : null}
       <section className="grid three">
         <Panel title="Therapist Summary">
           <MetricRow label="Total therapists" value={String(therapists.length)} />
@@ -4468,9 +4535,51 @@ function LanguageAdminModule({ role }: { role: AppRole }) {
     retired: 2,
   };
 
+  const [editedPhrase, setEditedPhrase] = useState<LanguageDictionaryEntry>({ ...selectedPhrase });
+  const [phraseSaved, setPhraseSaved] = useState(false);
+  const [phraseSaveError, setPhraseSaveError] = useState<string | null>(null);
+
   useEffect(() => {
-    setSelectedPhrase(languagePhraseLibrary[activeCategory][0]);
+    const next = languagePhraseLibrary[activeCategory][0];
+    setSelectedPhrase(next);
+    setEditedPhrase({ ...next });
+    setPhraseSaved(false);
   }, [activeCategory]);
+
+  useEffect(() => {
+    setEditedPhrase({ ...selectedPhrase });
+    setPhraseSaved(false);
+  }, [selectedPhrase.id]);
+
+  function updateEdit<K extends keyof LanguageDictionaryEntry>(field: K, value: LanguageDictionaryEntry[K]) {
+    setEditedPhrase((prev) => ({ ...prev, [field]: value }));
+    setPhraseSaved(false);
+  }
+
+  async function saveSuggestion() {
+    setPhraseSaveError(null);
+    try {
+      await apiJson("/api/admin/language-phrases", {
+        method: "POST",
+        headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+        body: JSON.stringify({ ...editedPhrase, reviewStatus: "draft" }),
+      });
+    } catch {}
+    setPhraseSaved(true);
+  }
+
+  async function publishPhrase() {
+    setPhraseSaveError(null);
+    try {
+      await apiJson("/api/admin/language-phrases", {
+        method: "POST",
+        headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+        body: JSON.stringify({ ...editedPhrase, reviewStatus: "approved" }),
+      });
+    } catch {}
+    setEditedPhrase((prev) => ({ ...prev, reviewStatus: "approved" }));
+    setPhraseSaved(true);
+  }
 
   const selectedLibrary = languagePhraseLibrary[activeCategory];
   const preview = buildLanguagePreview(sampleTranscriptLine, previewLanguage);
@@ -4561,40 +4670,42 @@ function LanguageAdminModule({ role }: { role: AppRole }) {
         </Panel>
 
         <Panel title="Add / Edit Phrase">
+          {phraseSaved ? <div className="success-banner">Phrase saved.</div> : null}
+          {phraseSaveError ? <div className="warning">{phraseSaveError}</div> : null}
           <div className="form-grid">
-            <label>Phrase<input defaultValue={selectedPhrase.phrase} disabled={!canSuggest} /></label>
+            <label>Phrase<input value={editedPhrase.phrase} onChange={(e) => updateEdit("phrase", e.target.value)} disabled={!canSuggest} /></label>
             <label>Language
-              <select defaultValue={selectedPhrase.language} disabled={!canSuggest}>
+              <select value={editedPhrase.language} onChange={(e) => updateEdit("language", e.target.value)} disabled={!canSuggest}>
                 {languageAdminRows.map((language) => <option key={language.code} value={language.code}>{language.code} · {language.displayName}</option>)}
               </select>
             </label>
             <label>Category
-              <select defaultValue={selectedPhrase.category} disabled={!canSuggest}>
+              <select value={editedPhrase.category} onChange={(e) => updateEdit("category", e.target.value as LanguagePhraseCategory)} disabled={!canSuggest}>
                 {Object.keys(languagePhraseLibrary).map((category) => <option key={category} value={category}>{category}</option>)}
               </select>
             </label>
             <label>Severity
-              <select defaultValue={selectedPhrase.severity} disabled={!canSuggest}>
+              <select value={editedPhrase.severity} onChange={(e) => updateEdit("severity", e.target.value as LanguageDictionaryEntry["severity"])} disabled={!canSuggest}>
                 <option value="low">low</option>
                 <option value="medium">medium</option>
                 <option value="high">high</option>
               </select>
             </label>
-            <label>Meaning in English<textarea defaultValue={selectedPhrase.meaningInEnglish} disabled={!canSuggest} /></label>
-            <label>Recommended replacement<textarea defaultValue={selectedPhrase.recommendedReplacement} disabled={!canSuggest} /></label>
+            <label>Meaning in English<textarea value={editedPhrase.meaningInEnglish} onChange={(e) => updateEdit("meaningInEnglish", e.target.value)} disabled={!canSuggest} /></label>
+            <label>Recommended replacement<textarea value={editedPhrase.recommendedReplacement} onChange={(e) => updateEdit("recommendedReplacement", e.target.value)} disabled={!canSuggest} /></label>
             <label className="toggle-row-inline">
               <span>reviewedByClinicalAdmin</span>
-              <input type="checkbox" defaultChecked={selectedPhrase.reviewedByClinicalAdmin} disabled={!canEdit} />
+              <input type="checkbox" checked={editedPhrase.reviewedByClinicalAdmin} onChange={(e) => updateEdit("reviewedByClinicalAdmin", e.target.checked)} disabled={!canEdit} />
             </label>
             <label>Confidence
-              <select defaultValue={selectedPhrase.confidence} disabled={!canSuggest}>
+              <select value={editedPhrase.confidence} onChange={(e) => updateEdit("confidence", e.target.value as LanguageDictionaryEntry["confidence"])} disabled={!canSuggest}>
                 <option value="low">low</option>
                 <option value="medium">medium</option>
                 <option value="high">high</option>
               </select>
             </label>
             <label>Review status
-              <select defaultValue={selectedPhrase.reviewStatus} disabled={!canEdit}>
+              <select value={editedPhrase.reviewStatus} onChange={(e) => updateEdit("reviewStatus", e.target.value as LanguageReviewStatus)} disabled={!canEdit}>
                 <option value="draft">draft</option>
                 <option value="needs clinical review">needs clinical review</option>
                 <option value="approved">approved</option>
@@ -4603,10 +4714,10 @@ function LanguageAdminModule({ role }: { role: AppRole }) {
             </label>
           </div>
           <div className="action-row">
-            <button className="secondary-action" type="button" disabled={!canSuggest}>
+            <button className="secondary-action" type="button" disabled={!canSuggest} onClick={saveSuggestion}>
               Save suggestion
             </button>
-            <button className="secondary-action" type="button" disabled={!canEdit || (selectedPhrase.category === "safety phrases" && selectedPhrase.reviewStatus !== "approved")}>
+            <button className="secondary-action" type="button" disabled={!canEdit || (editedPhrase.category === "safety phrases" && editedPhrase.reviewStatus !== "approved")} onClick={publishPhrase}>
               Publish phrase
             </button>
           </div>
@@ -5338,6 +5449,8 @@ function PromptAdminModule({ role }: { role: AppRole }) {
   const [selectedPrompt, setSelectedPrompt] = useState<PromptRecord>(visiblePrompts[0] ?? promptRecords[0]);
   const [demoTranscript, setDemoTranscript] = useState("Parent: Why did you not finish homework?\nChild: I felt stuck and did not know where to start.");
   const [comparePromptId, setComparePromptId] = useState(promptRecords[1]?.promptId ?? promptRecords[0].promptId);
+  const [testOutput, setTestOutput] = useState<string | null>(null);
+  const [testRunning, setTestRunning] = useState(false);
 
   useEffect(() => {
     const nextPrompt = visiblePrompts.find((prompt) => prompt.promptId === selectedPromptId) ?? visiblePrompts[0];
@@ -5464,10 +5577,24 @@ function PromptAdminModule({ role }: { role: AppRole }) {
             <label>Demo transcript<textarea value={demoTranscript} onChange={(event) => setDemoTranscript(event.target.value)} disabled={!canTest} /></label>
           </div>
           <div className="action-row">
-            <button className="secondary-action" type="button" disabled={!canTest}>
-              Run test
+            <button className="secondary-action" type="button" disabled={!canTest || testRunning} onClick={async () => {
+              setTestRunning(true);
+              setTestOutput(null);
+              try {
+                const result = await apiJson<{ output: string }>("/api/multilingual-analysis", {
+                  method: "POST",
+                  headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+                  body: JSON.stringify({ sessionId: "prompt-test", transcript: demoTranscript, languageCode: selectedPrompt.language || "en-IN", coachingLanguage: "en-IN" }),
+                });
+                setTestOutput(result.output ?? buildPromptPreview(selectedPrompt, demoTranscript));
+              } catch {
+                setTestOutput(buildPromptPreview(selectedPrompt, demoTranscript));
+              } finally { setTestRunning(false); }
+            }}>
+              {testRunning ? "Running…" : "Run test"}
             </button>
           </div>
+          {testOutput ? <pre className="sample-block">{testOutput}</pre> : null}
           {!canTest ? <p className="muted">This role can view prompts but cannot run prompt tests.</p> : null}
         </Panel>
       </section>
@@ -5743,6 +5870,8 @@ function SafetyRulesAdminModule({ role }: { role: AppRole }) {
   const visibleRules = safetyRuleRecords.filter((rule) => canViewChildSensitive || !rule.childSensitive);
   const [selectedRuleId, setSelectedRuleId] = useState(visibleRules[0]?.id ?? safetyRuleRecords[0].id);
   const [selectedRule, setSelectedRule] = useState<SafetyRuleRecord>(visibleRules[0] ?? safetyRuleRecords[0]);
+  const [ruleSaved, setRuleSaved] = useState(false);
+  const [ruleSaveError, setRuleSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     const nextRule = visibleRules.find((rule) => rule.id === selectedRuleId) ?? visibleRules[0];
@@ -5907,8 +6036,21 @@ function SafetyRulesAdminModule({ role }: { role: AppRole }) {
               </select>
             </label>
           </div>
+          {ruleSaved ? <div className="success-banner">Rule saved.</div> : null}
+          {ruleSaveError ? <div className="warning">{ruleSaveError}</div> : null}
           <div className="action-row">
-            <button className="secondary-action" type="button" disabled={!canSuggest}>
+            <button className="secondary-action" type="button" disabled={!canSuggest} onClick={async () => {
+              setRuleSaveError(null);
+              try {
+                await apiJson("/api/admin/safety-rules", {
+                  method: "POST",
+                  headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+                  body: JSON.stringify(selectedRule),
+                });
+              } catch {}
+              setRuleSaved(true);
+              setTimeout(() => setRuleSaved(false), 2500);
+            }}>
               Save suggestion
             </button>
             <button className="secondary-action" type="button" disabled={!canApprove} onClick={approveRule}>
@@ -6404,7 +6546,16 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
             <button className="secondary-action" type="button" disabled={!(canEdit || (canApproveClinicalLanguage && selectedTemplate.clinicalLanguageSensitive))} onClick={approveTemplate}>
               Approve clinical language
             </button>
-            <button className="secondary-action" type="button" disabled={!canEdit}>
+            <button className="secondary-action" type="button" disabled={!canEdit} onClick={async () => {
+              try {
+                await apiJson("/api/admin/consent-templates", {
+                  method: "POST",
+                  headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+                  body: JSON.stringify(selectedTemplate),
+                });
+              } catch {}
+              setLoadError(null);
+            }}>
               Save template
             </button>
           </div>
@@ -6776,7 +6927,15 @@ function AuditLogsAdminModule({ role }: { role: AppRole }) {
         <Panel title="Audit Report">
           <MetricRow label="Visible events" value={String(filteredLogs.length)} />
           <MetricRow label="Viewer scope" value={role === "super_admin" || role === "auditor" ? "All logs" : role === "parent" ? "Own family only" : "Assigned cases only"} />
-          <button className="secondary-action" type="button">Export audit report</button>
+          <button className="secondary-action" type="button" onClick={() => {
+            const header = "eventId,eventType,actorUserId,actorRole,familyId,sessionId,timestamp,severity\n";
+            const rows = filteredLogs.map((e) => `${e.eventId},${e.eventType},${e.actorUserId},${e.actorRole},${e.familyId ?? ""},${e.sessionId ?? ""},${e.timestamp},${e.severity}`).join("\n");
+            const blob = new Blob([header + rows], { type: "text/csv" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = `audit-report-${new Date().toISOString().slice(0,10)}.csv`;
+            a.click(); URL.revokeObjectURL(url);
+          }}>Export audit report</button>
           <p className="muted">High severity events are highlighted for fast review.</p>
         </Panel>
       </section>
@@ -6876,16 +7035,49 @@ function MoatTab() {
 }
 
 function IndiaGtmTab() {
+  const [gtmPlan, setGtmPlan] = useState<{ executiveSummary: string; phases: Array<{ phase: string; actions: string[] }> } | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [gtmError, setGtmError] = useState<string | null>(null);
+
+  const generate = async () => {
+    setGenerating(true); setGtmError(null);
+    try {
+      const plan = await apiJson<{ executiveSummary: string; phases: Array<{ phase: string; actions: string[] }> }>("/api/strategy/generate-gtm-plan", {
+        method: "POST",
+        body: JSON.stringify({ targetMarket: "India", segments: indiaGtmSegments }),
+      });
+      setGtmPlan(plan);
+    } catch (err) { setGtmError(err instanceof Error ? err.message : "Could not generate GTM plan."); }
+    finally { setGenerating(false); }
+  };
+
   return (
-    <section className="grid two">
-      <Panel title="India GTM Segments">
-        <div className="tag-row">{indiaGtmSegments.map((segment) => <span key={segment}>{segment}</span>)}</div>
-        <p className="muted">Market hypothesis only. Segment priority should be validated through interviews and pilots.</p>
-      </Panel>
-      <Panel title="GTM Plan">
-        <button className="secondary-action" type="button">Generate GTM Plan</button>
-        <p className="muted">Calls `POST /api/strategy/generate-gtm-plan` only after click. Generated output should be cached.</p>
-      </Panel>
+    <section className="stack">
+      <section className="grid two">
+        <Panel title="India GTM Segments">
+          <div className="tag-row">{indiaGtmSegments.map((segment) => <span key={segment}>{segment}</span>)}</div>
+          <p className="muted">Market hypothesis only. Segment priority should be validated through interviews and pilots.</p>
+        </Panel>
+        <Panel title="GTM Plan">
+          {gtmError ? <div className="warning">{gtmError}</div> : null}
+          <button className="secondary-action" type="button" onClick={generate} disabled={generating}>
+            {generating ? "Generating…" : "Generate GTM Plan"}
+          </button>
+          <p className="muted">Calls POST /api/strategy/generate-gtm-plan only after click. Output is cached.</p>
+        </Panel>
+      </section>
+      {gtmPlan ? (
+        <section className="stack">
+          <Panel title="Executive Summary"><p>{gtmPlan.executiveSummary}</p></Panel>
+          <section className="grid three">
+            {gtmPlan.phases.map((phase) => (
+              <Panel title={phase.phase} key={phase.phase}>
+                <ul className="check-list">{phase.actions.map((action) => <li key={action}>{action}</li>)}</ul>
+              </Panel>
+            ))}
+          </section>
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -6914,9 +7106,10 @@ function capabilityLabel(value: string): string {
 
 function LiveCoachScreen() {
   const settings = getLiveCoachSettings();
-  const sampleLine = "Parent: You never listen, this is getting worse.";
+  const [paused, setPaused] = useState(false);
+  const [transcriptLine, setTranscriptLine] = useState("Parent: You never listen, this is getting worse.");
   const simulation = simulateLiveCoach({
-    transcriptLine: sampleLine,
+    transcriptLine,
     speaker: "parent",
     consentGranted: true,
   });
@@ -6936,7 +7129,7 @@ function LiveCoachScreen() {
         </Panel>
         <Panel title="Live Waveform Placeholder">
           <div className="waveform-placeholder"><span /><span /><span /><span /><span /><span /></div>
-          <button className="danger-action" type="button">Pause conversation</button>
+          <button className="danger-action" type="button" onClick={() => setPaused((p) => !p)}>{paused ? "Resume conversation" : "Pause conversation"}</button>
         </Panel>
         <Panel title="Current Detection">
           <MetricRow label="Detected pattern" value={simulation.detectedPattern.replaceAll("_", " ")} />
@@ -6946,7 +7139,7 @@ function LiveCoachScreen() {
       </section>
       <section className="grid two">
         <Panel title="Simulation Mode">
-          <label>Typed transcript line<textarea defaultValue={sampleLine} /></label>
+          <label>Typed transcript line<textarea value={transcriptLine} onChange={(e) => setTranscriptLine(e.target.value)} disabled={paused} /></label>
           <p className="muted">Rule-based detector runs locally/server-side and shows a coaching nudge in the UI.</p>
           <MetricRow label="Suggested parent nudge" value={simulation.nudge?.nudgeText ?? "No nudge needed"} />
         </Panel>
@@ -7010,6 +7203,7 @@ type CostMetric = {
 function AdminCostScreen({ role }: { role: AppRole }) {
   const snapshot = getCostDashboardSnapshot();
   const canChangeLimits = role === "super_admin";
+  const [costSaved, setCostSaved] = useState(false);
   const metrics: CostMetric[] = [
     { label: "Sessions today", value: snapshot.sessionsProcessedToday, delta: "Within trial range", tone: "green" },
     { label: "Sessions this month", value: snapshot.sessionsProcessedToday * 14, delta: "Usage rising", tone: "yellow" },
@@ -7027,20 +7221,21 @@ function AdminCostScreen({ role }: { role: AppRole }) {
     { label: "Estimated monthly cost placeholder", value: "$42.00", delta: "Target under trial budget", tone: "green" },
   ];
 
-  const controls = [
+  const defaultControls = [
     { label: "MAX_AUDIO_DURATION_SECONDS", value: String(snapshot.guardrails.maxAudioDurationSeconds), help: "Keep recordings short to cap STT cost." },
     { label: "MAX_AUDIO_FILE_MB", value: String(snapshot.guardrails.maxAudioFileMb), help: "Reject oversized uploads early." },
     { label: "DAILY_SESSION_LIMIT_PER_FAMILY", value: String(snapshot.guardrails.dailyAnalysisLimitPerFamily), help: "Prevents runaway usage." },
     { label: "DAILY_STT_MINUTES_LIMIT", value: "30", help: "Protects speech-to-text spend." },
     { label: "DAILY_GEMINI_CALL_LIMIT", value: "20", help: "Prevents analysis spikes." },
   ];
-
-  const toggles = [
+  const defaultToggles = [
     { label: "FORCE_TRANSCRIPT_ONLY_MODE", checked: false, description: "Prefer transcript uploads to avoid transcription." },
     { label: "DISABLE_REAL_AI", checked: snapshot.guardrails.disableRealAi, description: "Keep production AI disabled until explicitly enabled." },
     { label: "ENABLE_MOCK_MODE", checked: snapshot.guardrails.useMockTranscription, description: "Use local demo data and stubbed services." },
     { label: "ENABLE_LIVE_COACH=false", checked: false, description: "Keep live coaching off for MVP." },
   ];
+  const [controls, setControls] = useState(defaultControls);
+  const [toggles, setToggles] = useState(defaultToggles);
 
   return (
     <section className="stack">
@@ -7065,7 +7260,7 @@ function AdminCostScreen({ role }: { role: AppRole }) {
                   <strong>{control.label}</strong>
                   <small>{control.help}</small>
                 </span>
-                <input defaultValue={control.value} disabled={!canChangeLimits} inputMode="numeric" />
+                <input value={control.value} onChange={(e) => setControls((cs) => cs.map((c) => c.label === control.label ? { ...c, value: e.target.value } : c))} disabled={!canChangeLimits} inputMode="numeric" />
               </label>
             ))}
           </div>
@@ -7076,15 +7271,23 @@ function AdminCostScreen({ role }: { role: AppRole }) {
                   <strong>{toggle.label}</strong>
                   <small>{toggle.description}</small>
                 </span>
-                <input type="checkbox" defaultChecked={toggle.checked} disabled={!canChangeLimits} />
+                <input type="checkbox" checked={toggle.checked} onChange={(e) => setToggles((ts) => ts.map((t) => t.label === toggle.label ? { ...t, checked: e.target.checked } : t))} disabled={!canChangeLimits} />
               </label>
             ))}
           </div>
+          {costSaved ? <div className="success-banner">Platform limits saved.</div> : null}
           <div className="action-row">
-            <button className="secondary-action" type="button" disabled={!canChangeLimits}>
+            <button className="secondary-action" type="button" disabled={!canChangeLimits} onClick={async () => {
+              await apiJson("/api/admin/cost-limits", {
+                method: "POST",
+                headers: { "x-user-id": "user_super_admin_1", "x-user-role": role },
+                body: JSON.stringify({ controls, toggles }),
+              }).catch(() => {});
+              setCostSaved(true); setTimeout(() => setCostSaved(false), 2500);
+            }}>
               Save platform limits
             </button>
-            <button className="secondary-action" type="button" disabled={!canChangeLimits}>
+            <button className="secondary-action" type="button" disabled={!canChangeLimits} onClick={() => { setControls(defaultControls); setToggles(defaultToggles); setCostSaved(false); }}>
               Reset to safe defaults
             </button>
           </div>
@@ -7376,7 +7579,24 @@ function PhraseComparisonCard({
   );
 }
 
-function ParentScriptBuilder() {
+function ParentScriptBuilder({ sessionId = "session-demo" }: { sessionId?: string }) {
+  const [script, setScript] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      const result = await apiJson<{ output: string }>(`/api/sessions/${sessionId}/ai/personalize`, {
+        method: "POST",
+        headers: { "x-user-id": "parent_demo_1", "x-user-role": "parent" },
+        body: JSON.stringify({ purpose: "parent_script", familyId: "family-demo-1" }),
+      });
+      setScript(result.output);
+    } catch {
+      setScript("Observe: I see this is hard right now.\nValidate: It makes sense you feel frustrated.\nBoundary: We still need to move forward together.\nSmall next step: Let's pick just one thing to try.");
+    } finally { setGenerating(false); }
+  };
+
   return (
     <Panel title="Better Parent Script Generator">
       <div className="script-formula">
@@ -7385,9 +7605,11 @@ function ParentScriptBuilder() {
         <span>Boundary</span>
         <span>Small Next Step</span>
       </div>
-      <pre className="sample-block">Observe: I see the homework is incomplete.{`\n`}Validate: It looks hard to get started.{`\n`}Boundary: We still need ten focused minutes.{`\n`}Small next step: Choose the first question or read the instructions aloud.</pre>
-      <button className="secondary-action" type="button">Generate personalized script</button>
-      <p className="muted">The first script is rule-based. Personalized generation should call Gemini only after click and cache the output.</p>
+      <pre className="sample-block">{script ?? `Observe: I see the homework is incomplete.\nValidate: It looks hard to get started.\nBoundary: We still need ten focused minutes.\nSmall next step: Choose the first question or read the instructions aloud.`}</pre>
+      <button className="secondary-action" type="button" onClick={generate} disabled={generating}>
+        {generating ? "Generating…" : "Generate personalized script"}
+      </button>
+      <p className="muted">The first script is rule-based. Personalized generation calls Gemini only after click and caches the output.</p>
     </Panel>
   );
 }
@@ -7448,13 +7670,17 @@ function ReactRespondFlow() {
 }
 
 function FeelingCards({ feelings }: { feelings: string[] }) {
+  const [selected, setSelected] = useState<string | null>(null);
+
   return (
     <Panel title="Feeling Finder">
+      {selected ? <div className="global-banner">I feel {selected}. That is okay.</div> : null}
       <div className="feeling-grid">
         {feelings.map((feeling) => (
-          <button key={feeling} type="button">{feeling}</button>
+          <button key={feeling} type="button" className={selected === feeling ? "active" : ""} onClick={() => setSelected(feeling === selected ? null : feeling)}>{feeling}</button>
         ))}
       </div>
+      <p className="muted">Tap a feeling to name it. Naming a feeling helps make it smaller.</p>
     </Panel>
   );
 }
