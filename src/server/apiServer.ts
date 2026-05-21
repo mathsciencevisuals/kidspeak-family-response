@@ -241,9 +241,19 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return json(response, 200, turns);
   }
 
+  if (method === "GET" && sessionId?.childRoute === "turns") {
+    const turns = await repository.getTranscriptTurns(sessionId.id);
+    return json(response, 200, turns);
+  }
+
   if (method === "POST" && sessionId?.childRoute === "nodes") {
     const body = nodesPayloadSchema.parse(await readJson(request));
     const nodes = await repository.saveConversationNodes(sessionId.id, body.nodes);
+    return json(response, 200, nodes);
+  }
+
+  if (method === "GET" && sessionId?.childRoute === "nodes") {
+    const nodes = await repository.getConversationNodes(sessionId.id);
     return json(response, 200, nodes);
   }
 

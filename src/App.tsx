@@ -245,6 +245,17 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function apiMaybeJson<T>(path: string, init?: RequestInit): Promise<T | null> {
+  try {
+    return await apiJson<T>(path, init);
+  } catch (error) {
+    if (error instanceof Error && /404|not found/i.test(error.message)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function saveRuntimeSession(bundle: RuntimeSessionBundle): void {
   if (typeof window === "undefined") {
     return;
@@ -288,6 +299,124 @@ function scoreRowsFromParentAnalysis(score: ParentAnalysis["score"]): Array<{ la
     { label: "Repair attempt", value: score.repairAttempt },
     { label: "Emotional regulation", value: score.emotionalRegulation },
   ];
+}
+
+function asSupportedLanguage(value: string): SupportedLanguage {
+  return ["en-IN", "hi-IN", "te-IN", "ta-IN"].includes(value) ? value as SupportedLanguage : "en-IN";
+}
+
+function sessionTitle(session: ConversationSession): string {
+  return `${session.situationType.replaceAll("_", " ")} · ${new Date(session.createdAt).toLocaleDateString()}`;
+}
+
+function sessionSummary(session: ConversationSession, parentAnalysis?: ParentAnalysisResponse | null): string {
+  return parentAnalysis?.patterns.length
+    ? `Patterns: ${parentAnalysis.patterns.join(", ")}`
+    : session.overallPattern;
+}
+
+function sessionSource(inputMode: ConversationSession["inputMode"]): Session["source"] {
+  if (inputMode === "live_audio") {
+    return "record";
+  }
+  if (inputMode === "uploaded_audio_transient") {
+    return "audio-upload";
+  }
+  return "transcript-upload";
+}
+
+function toSessionCard(bundle: RuntimeSessionBundle): Session {
+  const parentAnalysis = bundle.parentAnalysis;
+  const childAnalysis = bundle.childAnalysis;
+  const risk = bundle.riskAssessment?.assessment;
+  return {
+    id: bundle.session.id,
+    title: sessionTitle(bundle.session),
+    date: bundle.session.createdAt,
+    language: asSupportedLanguage(bundle.session.language),
+    source: sessionSource(bundle.session.inputMode),
+    summary: sessionSummary(bundle.session, parentAnalysis),
+    emotionalSignals: childAnalysis?.feelings ?? [],
+    communicationPatterns: parentAnalysis?.patterns ?? [],
+    coachingOpportunities: [
+      ...(parentAnalysis?.patterns ?? []),
+      ...(childAnalysis?.feelings ?? []).map((feeling) => `child: ${feeling}`),
+    ].slice(0, 4),
+    metric: {
+      sessionId: bundle.session.id,
+      familyId: bundle.session.familyId,
+      date: bundle.session.createdAt,
+      escalationRate: risk?.riskLevel === "critical" ? 0.9 : risk?.riskLevel === "high" ? 0.7 : risk?.riskLevel === "medium" ? 0.4 : 0.2,
+      parentValidationScore: parentAnalysis?.score.validationSkill ?? 0,
+      childRegulationScore: childAnalysis?.feelings.length ? 60 : 40,
+      repairScore: parentAnalysis?.score.repairAttempt ?? 0,
+      triggerFrequency: bundle.graph?.nodes.length ?? 0,
+      calmnessScore: parentAnalysis?.score.emotionalRegulation ?? 0,
+      professionalReviewRecommended: parentAnalysis?.professionalReviewRecommended ?? false,
+    },
+  };
+}
+
+function toHistorySession(bundle: RuntimeSessionBundle): HistorySession {
+  const parentAnalysis = bundle.parentAnalysis;
+  const childAnalysis = bundle.childAnalysis;
+  const risk = bundle.riskAssessment?.assessment;
+  return {
+    id: bundle.session.id,
+    date: new Date(bundle.session.createdAt).toLocaleDateString(),
+    child: bundle.session.childId,
+    situation: bundle.session.situationType.replaceAll("_", " "),
+    language: asSupportedLanguage(bundle.session.language),
+    riskLevel: risk?.riskLevel ?? bundle.session.riskLevel,
+    parentCoachingFocus: parentAnalysis?.patterns[0] ?? "Awaiting parent analysis",
+    childCoachingFocus: childAnalysis?.feelings[0] ?? "Awaiting child analysis",
+    repairScore: parentAnalysis?.score.repairAttempt ?? 0,
+    escalationRisk: risk?.riskLevel === "critical" ? 90 : risk?.riskLevel === "high" ? 70 : risk?.riskLevel === "medium" ? 40 : 20,
+    status: bundle.session.transcriptStatus === "analyzed" ? "analyzed" : bundle.session.transcriptStatus === "transcribed" ? "ready-for-analysis" : "pending-review",
+  };
+}
+
+async function fetchRuntimeSessionBundle(sessionId: string): Promise<RuntimeSessionBundle> {
+  const session = await apiJson<ConversationSession>(`/api/sessions/${sessionId}`);
+  const [turns, nodes, parentAnalysis, childAnalysis, storedRiskAssessment] = await Promise.all([
+    apiJson<ConversationTurn[]>(`/api/sessions/${sessionId}/turns`),
+    apiMaybeJson<ConversationNode[]>(`/api/sessions/${sessionId}/nodes`),
+    apiMaybeJson<ParentAnalysisResponse>(`/api/sessions/${sessionId}/parent-analysis`),
+    apiMaybeJson<ChildAnalysisResponse>(`/api/sessions/${sessionId}/child-analysis`),
+    apiMaybeJson<RiskAssessment>(`/api/sessions/${sessionId}/risk-assessment`),
+  ]);
+
+  const bundle: RuntimeSessionBundle = {
+    session,
+    turns,
+    speakerTagsDetected: turns.every((turn) => turn.speaker !== "unknown"),
+    graph: nodes ? {
+      nodes,
+      confidence: nodes.some((node) => node.analysisConfidence === "high") ? "high" : nodes.some((node) => node.analysisConfidence === "medium") ? "medium" : "low",
+      originalLanguage: asSupportedLanguage(session.language),
+      humanReviewRecommended: nodes.some((node) => node.analysisConfidence === "low"),
+      aiInferenceUsed: false,
+      cacheHit: true,
+      cachedBadge: "stored",
+      generatedAt: session.updatedAt,
+      analysisVersion: "stored-session-data",
+      regenerateAllowed: false,
+    } : null,
+    parentAnalysis,
+    childAnalysis,
+    riskAssessment: storedRiskAssessment ? {
+      assessment: storedRiskAssessment,
+      cacheHit: true,
+      cachedBadge: "stored",
+      generatedAt: session.updatedAt,
+      analysisVersion: "stored-session-data",
+      normalCoachingPrimary: !storedRiskAssessment.blockNormalCoaching,
+      message: storedRiskAssessment.recommendedAction,
+    } : null,
+  };
+
+  saveRuntimeSession(bundle);
+  return bundle;
 }
 
 const liveCoachPrinciples = [
@@ -1515,11 +1644,75 @@ function UploadTranscriptScreen() {
 }
 
 function SessionsScreen() {
-  return <SessionList items={sessions} />;
+  const [items, setItems] = useState<Session[]>(sessions);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const backendSessions = await apiJson<ConversationSession[]>("/api/sessions?familyId=family-demo-1");
+        const bundles = await Promise.all(backendSessions.map(async (session) => {
+          const local = loadRuntimeSession(session.id);
+          return local ?? fetchRuntimeSessionBundle(session.id);
+        }));
+        if (!cancelled) {
+          setItems(bundles.map(toSessionCard).sort((a, b) => b.date.localeCompare(a.date)));
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load sessions.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
+      {loading ? <p className="muted">Loading sessions...</p> : null}
+      <SessionList items={items} />
+    </section>
+  );
 }
 
 export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
-  const runtimeBundle = loadRuntimeSession(sessionId);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(sessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const bundle = await fetchRuntimeSessionBundle(sessionId);
+        if (!cancelled) {
+          setRuntimeBundle(bundle);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load session detail.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const detail = sessionAudioUiMap[sessionId] ?? {
     inputMode: "manual_text" as const,
     audioStored: false,
@@ -1540,6 +1733,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
   return (
     <section className="grid two session-detail-screen">
+      {error ? <div className="warning">{error}</div> : null}
       <Panel title="Session Detail">
         <MetricRow label="Session" value={sessionId} />
         <MetricRow label="Input mode" value={runtimeBundle?.session.inputMode ?? detail.inputMode} />
@@ -1574,8 +1768,43 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 }
 
 function HistoryScreen() {
+  const [historyItems, setHistoryItems] = useState<HistorySession[]>(historySessions);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const backendSessions = await apiJson<ConversationSession[]>("/api/sessions?familyId=family-demo-1");
+        const bundles = await Promise.all(backendSessions.map(async (session) => {
+          const local = loadRuntimeSession(session.id);
+          return local ?? fetchRuntimeSessionBundle(session.id);
+        }));
+        if (!cancelled) {
+          setHistoryItems(bundles.map(toHistorySession).sort((a, b) => b.date.localeCompare(a.date)));
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load history.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <Panel title="Filters">
         <section className="filter-grid">
           <label>Child<select><option>All children</option><option>Aarav</option><option>Mira</option></select></label>
@@ -1587,6 +1816,7 @@ function HistoryScreen() {
         </section>
       </Panel>
       <Panel title="Session History">
+        {loading ? <p className="muted">Loading history...</p> : null}
         <div className="history-table">
           <div className="history-header">
             <span>Date</span>
@@ -1601,7 +1831,7 @@ function HistoryScreen() {
             <span>Status</span>
             <span>Actions</span>
           </div>
-          {historySessions.map((session) => <HistorySessionRow key={session.id} session={session} />)}
+          {historyItems.map((session) => <HistorySessionRow key={session.id} session={session} />)}
         </div>
         <p className="muted">History uses Firestore session metrics for production. Demo data shows growth without diagnosis or blame labels.</p>
       </Panel>
@@ -1658,7 +1888,35 @@ function TrendsScreen() {
 }
 
 function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
-  const runtimeBundle = loadRuntimeSession(sessionId ?? latestRuntimeSessionId() ?? "");
+  const resolvedSessionId = sessionId ?? latestRuntimeSessionId() ?? "";
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(resolvedSessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!resolvedSessionId) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bundle = await fetchRuntimeSessionBundle(resolvedSessionId);
+        if (!cancelled) {
+          setRuntimeBundle(bundle);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load conversation graph.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedSessionId]);
+
   const nodes = runtimeBundle?.graph?.nodes ?? multilingualGraphNodes.map((node, index) => ({
     id: `mock-node-${index + 1}`,
     nodeType: "coaching",
@@ -1672,6 +1930,7 @@ function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <Panel title="Conversation Graph">
         <div className="graph">
           {nodes.map((node) => (
@@ -1702,13 +1961,36 @@ function ParentCoachingScreen() {
 }
 
 function ParentSessionCoachingScreen({ sessionId }: { sessionId: string }) {
-  const runtimeBundle = loadRuntimeSession(sessionId);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(sessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bundle = await fetchRuntimeSessionBundle(sessionId);
+        if (!cancelled) {
+          setRuntimeBundle(bundle);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load parent coaching.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const parentAnalysis = runtimeBundle?.parentAnalysis;
   const phraseComparison = parentAnalysis?.phraseComparisons[0];
   const scoreRows = parentAnalysis ? scoreRowsFromParentAnalysis(parentAnalysis.score) : parentAnalysisMock.scores;
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <AnalysisMetaBar generatedAt={parentAnalysis?.generatedAt ?? "2026-05-18T10:45:00.000Z"} analysisVersion={parentAnalysis?.analysisVersion ?? "family-response-intelligence-v11"} cached={Boolean(parentAnalysis?.cacheHit)} admin />
       <ProfessionalReviewBanner
         recommended={parentAnalysis?.professionalReviewRecommended ?? parentAnalysisMock.reviewRecommended}
@@ -1742,11 +2024,34 @@ function KidSelfCoachingScreen() {
 }
 
 function ChildSessionCoachingScreen({ sessionId }: { sessionId: string }) {
-  const runtimeBundle = loadRuntimeSession(sessionId);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(sessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bundle = await fetchRuntimeSessionBundle(sessionId);
+        if (!cancelled) {
+          setRuntimeBundle(bundle);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load child coaching.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const childAnalysis = runtimeBundle?.childAnalysis;
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <AnalysisMetaBar generatedAt={childAnalysis?.generatedAt ?? "2026-05-18T10:45:00.000Z"} analysisVersion={childAnalysis?.analysisVersion ?? "family-response-intelligence-v11"} cached={Boolean(childAnalysis?.cacheHit)} />
       <ReactRespondFlow />
       <section className="grid two">
@@ -1824,11 +2129,34 @@ function TherapistDashboardScreen() {
 }
 
 function SafetyRiskScreen({ sessionId }: { sessionId: string }) {
-  const runtimeBundle = loadRuntimeSession(sessionId);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() => loadRuntimeSession(sessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bundle = await fetchRuntimeSessionBundle(sessionId);
+        if (!cancelled) {
+          setRuntimeBundle(bundle);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load safety review.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const assessment = runtimeBundle?.riskAssessment?.assessment ?? assessSafetyRisk(sessionId, runtimeBundle?.turns ?? safetyDemoTurns);
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <SafetyReviewBanner assessment={assessment} />
       <section className="grid two">
         <Panel title="Risk Assessment">
