@@ -28,9 +28,6 @@ import {
   createExportSummary,
   createProfessionalNoteRecord,
   createTherapistAuditEvent,
-  getTherapistFamilySummary,
-  getTherapistHome,
-  getTherapistSessionReview,
   professionalNoteInputSchema,
 } from "../services/therapistDashboard";
 import { assessSafetyRisk } from "../services/safetyRiskClassifier";
@@ -700,17 +697,17 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
 
   if (method === "GET" && path === "/api/therapist/families") {
-    return json(response, 200, getTherapistHome());
+    return json(response, 200, await buildTherapistHome());
   }
 
   const therapistFamilySummaryId = matchTherapistFamilySummaryRoute(path);
   if (method === "GET" && therapistFamilySummaryId) {
-    return json(response, 200, getTherapistFamilySummary(therapistFamilySummaryId));
+    return json(response, 200, await buildTherapistFamilySummary(therapistFamilySummaryId));
   }
 
   const therapistSessionRoute = matchTherapistSessionRoute(path);
   if (therapistSessionRoute && method === "GET" && !therapistSessionRoute.childRoute) {
-    const review = getTherapistSessionReview(therapistSessionRoute.id);
+    const review = await buildTherapistSessionReview(therapistSessionRoute.id);
     await repository.saveTherapistAuditEvent(
       createTherapistAuditEvent("therapist_opened_session", "user_therapist_1", "Therapist opened session review.", {
         familyId: review.session.familyId,
@@ -1039,6 +1036,156 @@ function personalizedOutput(
     return `${prefix} therapist summary: observed correction-before-connection, child frustration signals, and a repair opportunity. This is a professional review support summary, not a diagnosis.`;
   }
   return `${prefix} deeper insight: the conversation appears to improve when validation comes before correction and the next step is small and concrete.`;
+}
+
+async function buildTherapistHome() {
+  const sessions = (await repository.listSessionsByFamily("family-demo-1"))
+    .concat(await repository.listSessionsByFamily("family-demo-2"))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const familyIds = Array.from(new Set(sessions.map((session) => session.familyId)));
+  const assignedFamilies = await Promise.all(familyIds.map((familyId) => buildAssignedFamily(familyId, sessions.filter((session) => session.familyId === familyId))));
+  const recentSessions = await Promise.all(sessions.slice(0, 5).map((session) => buildTherapistSessionCard(session)));
+
+  return {
+    assignedFamilies,
+    recentSessions,
+    highRiskSessions: recentSessions.filter((session) => session.riskLevel === "high" || session.riskLevel === "critical"),
+    pendingReviewSessions: recentSessions.filter((session) => session.status === "pending_review"),
+  };
+}
+
+async function buildTherapistFamilySummary(familyId: string) {
+  const sessions = (await repository.listSessionsByFamily(familyId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const assignedFamily = await buildAssignedFamily(familyId, sessions);
+  const childId = sessions[0]?.childId ?? "child_demo_1";
+  const metrics = await repository.getSessionHistoryByChild(familyId, childId);
+  const topTriggers = metrics.flatMap((metric) => metric.triggerTags).slice(0, 5);
+  const parentAnalyses = await Promise.all(sessions.map((session) => repository.getParentAnalysis(session.id)));
+  const childAnalyses = await Promise.all(sessions.map((session) => repository.getChildAnalysis(session.id)));
+  const risks = await Promise.all(sessions.map((session) => repository.getRiskAssessment(session.id)));
+  const assignedPractice = await Promise.all(sessions.map((session) => repository.listAssignedPractice(session.id)));
+
+  return {
+    familyId,
+    familyName: familyNameFor(familyId),
+    childName: childNameFor(childId),
+    therapistShareConsentGranted: true,
+    assignedTherapistUserId: "user_therapist_1",
+    topTriggers: topTriggers.length > 0 ? Array.from(new Set(topTriggers)).slice(0, 5) : ["Transcript analysis available"],
+    parentResponseTrends: parentAnalyses.flatMap((analysis) => analysis?.patterns ?? []).slice(0, 3).map((pattern) => `${pattern} observed in recent sessions.`),
+    childResponseTrends: childAnalyses.flatMap((analysis) => analysis?.feelings ?? []).slice(0, 3).map((feeling) => `Child showed ${feeling} and needed regulation support.`),
+    repairScoreTrend: metrics.map((metric) => metric.repairScore).slice(-4),
+    escalationTrend: metrics.map((metric) => metric.parentEscalationScore).slice(-4),
+    safetyRiskEvents: risks.filter((risk): risk is NonNullable<typeof risk> => Boolean(risk)).map((risk) => risk.recommendedAction),
+    homePracticeCompletion: assignedPractice.flat().length > 0 ? 100 : 0,
+    cachedSummary: parentAnalyses.find(Boolean)?.script ?? "Observed communication patterns are available from stored session analyses.",
+  };
+}
+
+async function buildTherapistSessionReview(sessionId: string) {
+  const session = await repository.getSession(sessionId);
+  if (!session) {
+    throw new Error("Therapist session not found");
+  }
+
+  const [turns, nodes, parentAnalysis, childAnalysis, riskAssessment, professionalNotes, assignedPractice] = await Promise.all([
+    repository.getTranscriptTurns(sessionId),
+    repository.getConversationNodes(sessionId),
+    repository.getParentAnalysis(sessionId),
+    repository.getChildAnalysis(sessionId),
+    repository.getRiskAssessment(sessionId),
+    repository.listProfessionalNotes(sessionId),
+    repository.listAssignedPractice(sessionId),
+  ]);
+
+  const sessionCard = await buildTherapistSessionCard(session);
+
+  return {
+    session: sessionCard,
+    consentRequired: "therapist_share" as const,
+    accessGranted: true,
+    transcriptTimeline: turns.map((turn) => ({
+      speaker: turn.speaker,
+      time: secondsToClock(turn.startTimeSec),
+      text: turn.text,
+      emotionalSignal: turn.emotionLabel || turn.toneLabel || turn.intentLabel,
+    })),
+    conversationGraph: nodes.map((node) => ({
+      nodeType: node.nodeType,
+      label: node.title,
+      detectedPattern: node.detectedPattern ?? node.description,
+      confidence: node.analysisConfidence ?? "low",
+    })),
+    parentCoachingObservations: parentAnalysis?.patterns.map((pattern) => `${pattern} observed in session.`) ?? ["Parent analysis not generated yet."],
+    childCopingSignals: childAnalysis?.feelings.map((feeling) => `Child showed ${feeling}.`) ?? ["Child analysis not generated yet."],
+    riskFlags: riskAssessment ? [riskAssessment.recommendedAction] : ["No critical risk flag in stored analysis."],
+    cachedProfessionalSummary: parentAnalysis?.script ?? "Stored analysis available for therapist review.",
+    professionalNotes,
+    assignedPractice,
+  };
+}
+
+async function buildAssignedFamily(familyId: string, sessions: Array<Awaited<ReturnType<typeof repository.getSession>> extends infer T ? T extends null ? never : T : never>) {
+  const childId = sessions[0]?.childId ?? "child_demo_1";
+  const risks = await Promise.all(sessions.map((session) => repository.getRiskAssessment(session.id)));
+  return {
+    id: familyId,
+    name: familyNameFor(familyId),
+    childName: childNameFor(childId),
+    assignedTherapistUserId: "user_therapist_1",
+    therapistShareConsentGranted: true,
+    recentSessionCount: sessions.length,
+    pendingReviewCount: sessions.filter((session) => session.transcriptStatus !== "analyzed").length,
+    highRiskCount: risks.filter((risk) => risk?.riskLevel === "high" || risk?.riskLevel === "critical").length,
+    lastSessionAt: sessions[0]?.createdAt ?? new Date().toISOString(),
+  };
+}
+
+async function buildTherapistSessionCard(session: Awaited<ReturnType<typeof repository.getSession>> extends infer T ? T extends null ? never : T : never) {
+  const [risk, parentAnalysis] = await Promise.all([
+    repository.getRiskAssessment(session.id),
+    repository.getParentAnalysis(session.id),
+  ]);
+  return {
+    id: session.id,
+    familyId: session.familyId,
+    familyName: familyNameFor(session.familyId),
+    childName: childNameFor(session.childId),
+    date: session.createdAt.slice(0, 10),
+    situation: session.situationType.replaceAll("_", " "),
+    language: session.language,
+    riskLevel: risk?.riskLevel ?? session.riskLevel,
+    status: session.transcriptStatus === "analyzed" ? "reviewed" : "pending_review",
+    summary: parentAnalysis?.patterns.length
+      ? `Stored analysis shows ${parentAnalysis.patterns.join(", ")}.`
+      : session.overallPattern,
+  };
+}
+
+function familyNameFor(familyId: string): string {
+  if (familyId === "family-demo-1") {
+    return "Rao Family";
+  }
+  if (familyId === "family-demo-2") {
+    return "Iyer Family";
+  }
+  return familyId;
+}
+
+function childNameFor(childId: string): string {
+  if (childId === "child_demo_1") {
+    return "Aarav";
+  }
+  if (childId === "child_demo_2") {
+    return "Mira";
+  }
+  return childId;
+}
+
+function secondsToClock(seconds: number): string {
+  const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
+  const remainder = Math.floor(seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remainder}`;
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

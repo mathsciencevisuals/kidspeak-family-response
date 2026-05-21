@@ -444,10 +444,26 @@ export class Sprint1Repository {
     return note;
   }
 
+  async listProfessionalNotes(sessionId: string): Promise<ProfessionalNoteRecord[]> {
+    const noteIds = await this.storage.members(sessionProfessionalNotesKey(sessionId));
+    const notes = await Promise.all(noteIds.map((noteId) => this.storage.getJson<ProfessionalNoteRecord>(professionalNoteKey(noteId))));
+    return notes
+      .filter((note): note is ProfessionalNoteRecord => Boolean(note))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   async saveAssignedPractice(practice: AssignedPracticeRecord): Promise<AssignedPracticeRecord> {
     await this.storage.setJson(assignedPracticeKey(practice.id), practice);
     await this.storage.addToSet(sessionAssignedPracticeKey(practice.sessionId), practice.id);
     return practice;
+  }
+
+  async listAssignedPractice(sessionId: string): Promise<AssignedPracticeRecord[]> {
+    const practiceIds = await this.storage.members(sessionAssignedPracticeKey(sessionId));
+    const practices = await Promise.all(practiceIds.map((practiceId) => this.storage.getJson<AssignedPracticeRecord>(assignedPracticeKey(practiceId))));
+    return practices
+      .filter((practice): practice is AssignedPracticeRecord => Boolean(practice))
+      .sort((a, b) => a.assignedAt.localeCompare(b.assignedAt));
   }
 
   async saveTherapistAuditEvent(event: TherapistAuditEvent): Promise<TherapistAuditEvent> {

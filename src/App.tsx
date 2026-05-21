@@ -2082,11 +2082,40 @@ function ChildSessionCoachingScreen({ sessionId }: { sessionId: string }) {
 }
 
 function TherapistDashboardScreen() {
+  const [home, setHome] = useState(() => getTherapistHome());
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<ReturnType<typeof getTherapistHome>>("/api/therapist/families", {
+          headers: {
+            "x-user-id": "user_therapist_1",
+            "x-user-role": "therapist",
+          },
+        });
+        if (!cancelled) {
+          setHome(data);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load therapist dashboard.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <section className="grid three">
         <Panel title="Assigned Families">
-          {therapistFamilies.map((family) => (
+          {home.assignedFamilies.map((family) => (
             <article className="mini-card" key={family.id}>
               <a href={`/therapist/families/${family.id}`}><strong>{family.name}</strong></a>
               <span>{family.childName} · {family.recentSessionCount} recent sessions</span>
@@ -2095,12 +2124,12 @@ function TherapistDashboardScreen() {
           ))}
         </Panel>
         <Panel title="Recent Sessions">
-          {therapistSessions.map((session) => (
+          {home.recentSessions.map((session) => (
             <MetricRow key={session.id} label={session.situation} value={`${session.language} · ${session.status.replace("_", " ")}`} />
           ))}
         </Panel>
         <Panel title="High-Risk / Pending Review">
-          {therapistSessions.filter((session) => session.status === "pending_review" || session.riskLevel === "high").map((session) => (
+          {home.pendingReviewSessions.filter((session) => session.status === "pending_review" || session.riskLevel === "high").map((session) => (
             <article className="mini-card" key={session.id}>
               <a href={`/therapist/sessions/${session.id}`}><strong>{session.situation}</strong></a>
               <span>{session.familyName} · risk {session.riskLevel}</span>
@@ -2191,10 +2220,37 @@ function SafetyRiskScreen({ sessionId }: { sessionId: string }) {
 }
 
 function TherapistFamilySummaryScreen({ familyId }: { familyId: string }) {
-  const summary = getTherapistFamilySummary(familyId);
+  const [summary, setSummary] = useState(() => getTherapistFamilySummary(familyId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<ReturnType<typeof getTherapistFamilySummary>>(`/api/therapist/families/${familyId}/summary`, {
+          headers: {
+            "x-user-id": "user_therapist_1",
+            "x-user-role": "therapist",
+          },
+        });
+        if (!cancelled) {
+          setSummary(data);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load therapist family summary.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [familyId]);
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <section className="grid four">
         <Panel title="Family Access">
           <MetricRow label="Family" value={summary.familyName} />
@@ -2231,10 +2287,37 @@ function TherapistFamilySummaryScreen({ familyId }: { familyId: string }) {
 }
 
 function TherapistSessionReviewScreen({ sessionId }: { sessionId: string }) {
-  const review = getTherapistSessionReview(sessionId);
+  const [review, setReview] = useState(() => getTherapistSessionReview(sessionId));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<ReturnType<typeof getTherapistSessionReview>>(`/api/therapist/sessions/${sessionId}`, {
+          headers: {
+            "x-user-id": "user_therapist_1",
+            "x-user-role": "therapist",
+          },
+        });
+        if (!cancelled) {
+          setReview(data);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load therapist session review.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
       <AnalysisMetaBar generatedAt="2026-05-18T10:45:00.000Z" analysisVersion="family-response-intelligence-v11" cached admin />
       <ProfessionalReviewBanner
         recommended={review.riskFlags.some((flag) => flag.includes("Professional review"))}
