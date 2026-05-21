@@ -419,6 +419,49 @@ async function fetchRuntimeSessionBundle(sessionId: string): Promise<RuntimeSess
   return bundle;
 }
 
+type PrivacyAuditLogItem = {
+  id: string;
+  familyId: string;
+  sessionId?: string;
+  eventType: string;
+  actorUserId: string;
+  createdAt: string;
+  details: string;
+};
+
+type ConsentRecordItem = {
+  id: string;
+  familyId: string;
+  childId: string;
+  parentUserId: string;
+  consentType: string;
+  status: string;
+  grantedAt: string;
+  revokedAt?: string;
+};
+
+async function fetchAdminPrivacySnapshot() {
+  const [familyOneConsents, familyTwoConsents, familyOneAudit, familyTwoAudit] = await Promise.all([
+    apiJson<ConsentRecordItem[]>("/api/privacy/consents?familyId=family-demo-1", {
+      headers: { "x-user-id": "admin_demo_1", "x-user-role": "admin" },
+    }),
+    apiJson<ConsentRecordItem[]>("/api/privacy/consents?familyId=family-demo-2", {
+      headers: { "x-user-id": "admin_demo_1", "x-user-role": "admin" },
+    }),
+    apiJson<PrivacyAuditLogItem[]>("/api/audit-logs?familyId=family-demo-1", {
+      headers: { "x-user-id": "admin_demo_1", "x-user-role": "admin" },
+    }),
+    apiJson<PrivacyAuditLogItem[]>("/api/audit-logs?familyId=family-demo-2", {
+      headers: { "x-user-id": "admin_demo_1", "x-user-role": "admin" },
+    }),
+  ]);
+
+  return {
+    consents: [...familyOneConsents, ...familyTwoConsents],
+    auditEvents: [...familyOneAudit, ...familyTwoAudit].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+  };
+}
+
 const liveCoachPrinciples = [
   "Simulation-first.",
   "Consent-first.",
@@ -5326,11 +5369,35 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
   const [retentionDays, setRetentionDays] = useState({ transcript: 730, summary: 1825, audit: 1825 });
   const [deletionWorkflow, setDeletionWorkflow] = useState("manual_review");
   const [requestFilter, setRequestFilter] = useState("export");
+  const [consentRecords, setConsentRecords] = useState<ConsentRecordItem[]>([]);
+  const [auditEvents, setAuditEvents] = useState<PrivacyAuditLogItem[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     const nextTemplate = consentTemplateRecords.find((template) => template.id === selectedTemplateId) ?? consentTemplateRecords[0];
     setSelectedTemplate(nextTemplate);
   }, [selectedTemplateId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snapshot = await fetchAdminPrivacySnapshot();
+        if (!cancelled) {
+          setConsentRecords(snapshot.consents);
+          setAuditEvents(snapshot.auditEvents);
+          setLoadError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : "Could not load admin privacy data.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const noAudioStorageEvidence = {
     audioStoredFalseCount: 124,
@@ -5351,7 +5418,18 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
     "no ads based on child behaviour",
   ];
 
-  const filteredRequests = complianceDataRequests[requestFilter] ?? complianceDataRequests.export;
+  const filteredRequests = auditEvents.filter((event) => {
+    if (requestFilter === "export") {
+      return event.eventType === "data_exported";
+    }
+    if (requestFilter === "deleteSession" || requestFilter === "deleteChildProfile") {
+      return event.eventType === "data_deleted";
+    }
+    if (requestFilter === "revokeTherapistAccess") {
+      return event.eventType === "consent_revoked" && event.details.includes("therapist_share");
+    }
+    return false;
+  });
 
   function approveTemplate() {
     if (!(canEdit || (canApproveClinicalLanguage && selectedTemplate.clinicalLanguageSensitive))) {
@@ -5373,6 +5451,7 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
 
   return (
     <section className="stack compliance-admin">
+      {loadError ? <div className="warning">{loadError}</div> : null}
       <section className="grid two">
         <Panel title={sectionLabel}>
           <MetricRow label="Access" value={auditorView ? "View only" : canEdit ? "Edit" : "Approve clinical language"} />
@@ -5443,19 +5522,31 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
               <span>IP hash</span>
               <span>User agent hash</span>
             </div>
-            {parentAcceptanceRecords.map((record) => (
-              <div className="compliance-table-row" key={`${record.family}-${record.consentType}`}>
-                <span>{record.family}</span>
-                <span>{record.child}</span>
+            {consentRecords.length > 0 ? consentRecords.map((record) => (
+              <div className="compliance-table-row" key={record.id}>
+                <span>{record.familyId}</span>
+                <span>{record.childId}</span>
                 <span>{record.consentType}</span>
-                <span>{record.version}</span>
-                <span className={record.state === "revoked" ? "status-chip revoked" : "status-chip accepted"}>{record.state}</span>
-                <span>{record.acceptedAt}</span>
-                <span>{record.revokedAt}</span>
-                <span>{record.sourceIpHash}</span>
-                <span>{record.userAgentHash}</span>
+                <span>live</span>
+                <span className={record.status === "revoked" ? "status-chip revoked" : "status-chip accepted"}>{record.status}</span>
+                <span>{new Date(record.grantedAt).toLocaleString()}</span>
+                <span>{record.revokedAt ? new Date(record.revokedAt).toLocaleString() : "-"}</span>
+                <span>stored</span>
+                <span>stored</span>
               </div>
-            ))}
+            )) : (
+              <div className="compliance-table-row">
+                <span>No consent records</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+                <span>-</span>
+              </div>
+            )}
           </div>
         </Panel>
         <Panel title="Data Retention Policy">
@@ -5505,9 +5596,9 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
           <div className="audit-log">
             {filteredRequests.map((request) => (
               <article className="audit-log-row" key={request.id}>
-                <strong>{request.family} · {request.child}</strong>
-                <span>{request.requestedAt} · {request.status.replaceAll("_", " ")}</span>
-                <span>{request.note}</span>
+                <strong>{request.familyId} · {request.sessionId ?? "family-wide"}</strong>
+                <span>{new Date(request.createdAt).toLocaleString()} · {request.eventType.replaceAll("_", " ")}</span>
+                <span>{request.details}</span>
               </article>
             ))}
           </div>
@@ -5543,9 +5634,9 @@ function PrivacyComplianceAdminModule({ path, role }: { path: string; role: AppR
           </ul>
         </Panel>
         <Panel title="Evidence Summary">
-          <MetricRow label="Parent acceptance records" value={String(parentAcceptanceRecords.length)} />
+          <MetricRow label="Parent acceptance records" value={String(consentRecords.length)} />
           <MetricRow label="Templates tracked" value={String(consentTemplateRecords.length)} />
-          <MetricRow label="Delete requests queued" value={String(complianceDataRequests.deleteSession.length + complianceDataRequests.deleteChildProfile.length)} />
+          <MetricRow label="Delete requests queued" value={String(auditEvents.filter((event) => event.eventType === "data_deleted").length)} />
           <MetricRow label="Audit log retention" value={`${retentionDays.audit} days`} />
           <MetricRow label="Therapist sharing consent" value="Tracked" />
         </Panel>
@@ -5668,12 +5759,49 @@ function FeatureFlagsAdminModule({ role }: { role: AppRole }) {
 }
 
 function AuditLogsAdminModule({ role }: { role: AppRole }) {
+  const [liveLogs, setLiveLogs] = useState<PrivacyAuditLogItem[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [eventTypeFilter, setEventTypeFilter] = useState("all");
   const [familyOrSessionFilter, setFamilyOrSessionFilter] = useState("");
   const [actorRoleFilter, setActorRoleFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("2026-05-19");
 
-  const visibleLogs = adminAuditLogEvents.filter((event) => {
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snapshot = await fetchAdminPrivacySnapshot();
+        if (!cancelled) {
+          setLiveLogs(snapshot.auditEvents);
+          setLoadError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : "Could not load admin audit logs.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const adminVisibleLogs = liveLogs.map((event) => ({
+    eventId: event.id,
+    eventType: event.eventType,
+    actorUserId: event.actorUserId,
+    actorRole: event.actorUserId.includes("therapist") ? "therapist" : event.actorUserId.includes("admin") ? "admin" : "parent",
+    familyId: event.familyId,
+    childId: undefined,
+    sessionId: event.sessionId,
+    timestamp: event.createdAt,
+    ipHash: "stored",
+    userAgentHash: "stored",
+    metadata: event.details,
+    severity: event.eventType.includes("deleted") ? "high" : event.eventType.includes("revoked") ? "medium" : "low",
+  }));
+
+  const visibleLogs = adminVisibleLogs.filter((event) => {
     if (role === "super_admin" || role === "auditor") {
       return true;
     }
@@ -5713,13 +5841,14 @@ function AuditLogsAdminModule({ role }: { role: AppRole }) {
 
   return (
     <section className="stack audit-admin">
+      {loadError ? <div className="warning">{loadError}</div> : null}
       <section className="grid two">
         <Panel title="Filters">
           <div className="filter-grid">
             <label>Event type
               <select value={eventTypeFilter} onChange={(event) => setEventTypeFilter(event.target.value)}>
                 <option value="all">All</option>
-                {Array.from(new Set(adminAuditLogEvents.map((item) => item.eventType))).map((eventType) => (
+                {Array.from(new Set(adminVisibleLogs.map((item) => item.eventType))).map((eventType) => (
                   <option key={eventType} value={eventType}>{eventType}</option>
                 ))}
               </select>
@@ -5730,7 +5859,7 @@ function AuditLogsAdminModule({ role }: { role: AppRole }) {
             <label>Actor role
               <select value={actorRoleFilter} onChange={(event) => setActorRoleFilter(event.target.value)}>
                 <option value="all">All</option>
-                {Array.from(new Set(adminAuditLogEvents.map((item) => item.actorRole))).map((actorRole) => (
+                {Array.from(new Set(adminVisibleLogs.map((item) => item.actorRole))).map((actorRole) => (
                   <option key={actorRole} value={actorRole}>{actorRole}</option>
                 ))}
               </select>
