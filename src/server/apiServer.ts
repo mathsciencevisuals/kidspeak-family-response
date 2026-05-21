@@ -2,6 +2,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, normalize } from "node:path";
 import { URL } from "node:url";
+import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { z, ZodError } from "zod";
 import { Sprint1Repository } from "../repositories/sprint1Repository";
 import { AdminRepository } from "../repositories/adminRepository";
@@ -314,6 +315,65 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const body = liveCoachChunkPayloadSchema.parse(await readJson(request));
     return json(response, 200, analyzeLiveCoachChunk(body));
   }
+
+  // ── Auth endpoints (public — no requireAuth guard) ──────────────────────
+  if (method === "POST" && path === "/api/auth/signup") {
+    const body = z.object({
+      email: z.string().email(),
+      password: z.string().min(8),
+      displayName: z.string().min(1),
+      role: z.enum(["parent", "therapist", "psychologist", "clinical_admin", "super_admin", "support_staff", "auditor"]),
+    }).parse(await readJson(request));
+
+    const existingRaw = await storage.getJson<{ userId: string }>(`auth:user:${body.email}`);
+    if (existingRaw) return json(response, 409, { error: "Email already registered." });
+
+    const salt = randomBytes(16).toString("hex");
+    const passwordHash = pbkdf2Sync(body.password, salt, 100_000, 32, "sha256").toString("hex");
+    const userId = `user_${randomBytes(8).toString("hex")}`;
+    const familyId = body.role === "parent" ? `family_${randomBytes(6).toString("hex")}` : null;
+
+    await storage.setJson(`auth:user:${body.email}`, { userId, email: body.email, displayName: body.displayName, role: body.role, passwordHash, salt, familyId });
+
+    const token = randomBytes(32).toString("hex");
+    await storage.setJson(`auth:token:${token}`, { userId, email: body.email, displayName: body.displayName, role: body.role, familyId, createdAt: new Date().toISOString() });
+
+    return json(response, 201, { token, userId, email: body.email, displayName: body.displayName, role: body.role, familyId });
+  }
+
+  if (method === "POST" && path === "/api/auth/login") {
+    const body = z.object({
+      email: z.string().email(),
+      password: z.string().min(1),
+    }).parse(await readJson(request));
+
+    const stored = await storage.getJson<{ userId: string; email: string; displayName: string; role: string; passwordHash: string; salt: string; familyId: string | null }>(`auth:user:${body.email}`);
+    if (!stored) return json(response, 401, { error: "Invalid email or password." });
+
+    const hash = pbkdf2Sync(body.password, stored.salt, 100_000, 32, "sha256").toString("hex");
+    if (hash !== stored.passwordHash) return json(response, 401, { error: "Invalid email or password." });
+
+    const token = randomBytes(32).toString("hex");
+    await storage.setJson(`auth:token:${token}`, { userId: stored.userId, email: stored.email, displayName: stored.displayName, role: stored.role, familyId: stored.familyId, createdAt: new Date().toISOString() });
+
+    return json(response, 200, { token, userId: stored.userId, email: stored.email, displayName: stored.displayName, role: stored.role, familyId: stored.familyId });
+  }
+
+  if (method === "POST" && path === "/api/auth/logout") {
+    const body = await readJson(request) as { token?: string };
+    if (body.token) await storage.setJson(`auth:token:${body.token}`, null);
+    return json(response, 200, { ok: true });
+  }
+
+  if (method === "GET" && path === "/api/auth/me") {
+    const authHeader = request.headers.authorization;
+    const token = authHeader?.replace("Bearer ", "");
+    if (!token) return json(response, 401, { error: "No token." });
+    const session = await storage.getJson<{ userId: string; email: string; displayName: string; role: string; familyId: string | null }>(`auth:token:${token}`);
+    if (!session) return json(response, 401, { error: "Token expired or invalid." });
+    return json(response, 200, session);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   if (method === "POST" && path === "/api/family-profile") {
     const body = await readJson(request) as Record<string, unknown>;
@@ -1379,6 +1439,9 @@ function authorizeRequest(
 
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
   if (path === "/healthz" || (!path.startsWith("/api/") && request.method === "GET")) {
+    return true;
+  }
+  if (path.startsWith("/api/auth/")) {
     return true;
   }
   if (!request.headers.authorization && context.userId === "anonymous") {

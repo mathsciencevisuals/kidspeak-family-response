@@ -111,6 +111,40 @@ type RuntimeSessionBundle = {
 
 const runtimeSessionStoragePrefix = "kidspeak-runtime-session:";
 const runtimeLatestSessionKey = "kidspeak-runtime-latest-session";
+const AUTH_STORAGE_KEY = "kidspeak-auth-session";
+
+type AuthSession = {
+  token: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  role: AppRole;
+  familyId: string | null;
+};
+
+function loadAuthSession(): AuthSession | null {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as AuthSession) : null;
+  } catch { return null; }
+}
+
+function saveAuthSession(session: AuthSession) {
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearAuthSession() {
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function makeAuthHeaders(session: AuthSession) {
+  return {
+    authorization: `Bearer ${session.token}`,
+    "x-user-id": session.userId,
+    "x-user-role": session.role,
+  };
+}
+
 const apiAuthHeaders = {
   authorization: "Bearer demo-parent-token",
   "x-user-id": "parent_demo_1",
@@ -1092,9 +1126,160 @@ const adminAuditLogEvents: AdminAuditLogRecord[] = [
   },
 ];
 
+function LoginScreen({ onLogin, onGoSignup }: { onLogin: (s: AuthSession) => void; onGoSignup: () => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) { setError("Email and password are required."); return; }
+    setSubmitting(true); setError(null);
+    try {
+      const session = await apiJson<AuthSession>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      });
+      onLogin(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed. Check your credentials.");
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <h1>KidSpeak</h1>
+          <p>Family response intelligence</p>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
+          <h2>Sign in</h2>
+          {error ? <div className="warning">{error}</div> : null}
+          <label>Email address
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" autoFocus required />
+          </label>
+          <label>Password
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" required />
+          </label>
+          <button className="primary-action" type="submit" disabled={submitting}>
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+        <div className="auth-footer">
+          <span>No account?</span>
+          <button type="button" className="auth-link-btn" onClick={onGoSignup}>Create one</button>
+        </div>
+        <div className="auth-demo-hint">
+          <p>Demo accounts — sign up with any email and choose a role to explore.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignupScreen({ onLogin, onGoLogin }: { onLogin: (s: AuthSession) => void; onGoLogin: () => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [role, setRole] = useState<AppRole>("parent");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password || !displayName) { setError("All fields are required."); return; }
+    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (password !== confirm) { setError("Passwords do not match."); return; }
+    setSubmitting(true); setError(null);
+    try {
+      const session = await apiJson<AuthSession>("/api/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password, displayName: displayName.trim(), role }),
+      });
+      onLogin(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Signup failed. Try a different email.");
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <h1>KidSpeak</h1>
+          <p>Family response intelligence</p>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
+          <h2>Create account</h2>
+          {error ? <div className="warning">{error}</div> : null}
+          <label>Full name
+            <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Your name" autoComplete="name" autoFocus required />
+          </label>
+          <label>Email address
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required />
+          </label>
+          <label>Password
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min. 8 characters" autoComplete="new-password" required />
+          </label>
+          <label>Confirm password
+            <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Repeat password" autoComplete="new-password" required />
+          </label>
+          <label>I am a…
+            <select value={role} onChange={(e) => setRole(e.target.value as AppRole)}>
+              <option value="parent">Parent / guardian</option>
+              <option value="therapist">Therapist</option>
+              <option value="psychologist">Psychologist</option>
+              <option value="clinical_admin">Clinical admin</option>
+              <option value="support_staff">Support staff</option>
+              <option value="auditor">Auditor</option>
+              <option value="super_admin">Super admin</option>
+            </select>
+          </label>
+          <button className="primary-action" type="submit" disabled={submitting}>
+            {submitting ? "Creating account…" : "Create account"}
+          </button>
+        </form>
+        <div className="auth-footer">
+          <span>Already have an account?</span>
+          <button type="button" className="auth-link-btn" onClick={onGoLogin}>Sign in</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [path, setPath] = useState(() => normalizePath(window.location.pathname));
-  const [role, setRole] = useState<AppRole>("parent");
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => loadAuthSession());
+  const role: AppRole = authSession?.role ?? "parent";
+
+  function onLogin(session: AuthSession) {
+    saveAuthSession(session);
+    setAuthSession(session);
+    window.history.pushState(null, "", "/dashboard");
+    setPath("/dashboard");
+  }
+
+  function onLogout() {
+    if (authSession) {
+      apiJson("/api/auth/logout", { method: "POST", body: JSON.stringify({ token: authSession.token }) }).catch(() => {});
+    }
+    clearAuthSession();
+    setAuthSession(null);
+    window.history.pushState(null, "", "/login");
+    setPath("/login");
+  }
+
+  // Show auth screens before the shell
+  if (!authSession || path === "/login") {
+    return <LoginScreen onLogin={onLogin} onGoSignup={() => { window.history.pushState(null, "", "/signup"); setPath("/signup"); }} />;
+  }
+  if (path === "/signup") {
+    return <SignupScreen onLogin={onLogin} onGoLogin={() => { window.history.pushState(null, "", "/login"); setPath("/login"); }} />;
+  }
   const product = productNames.find((name) => name.active) ?? productNames[0];
   const visibleNavGroups = useMemo(() => getVisibleNavGroups(role), [role]);
   const routeAccess = useMemo(() => canAccessRoute(path, role), [path, role]);
@@ -1191,18 +1376,11 @@ export function App() {
           <span className="eyebrow">Product option</span>
           <h1>{product.name}</h1>
           <p>{product.positioning}</p>
-          <label className="role-picker">
-            Logged-in role
-            <select value={role} onChange={(event) => setRole(event.target.value as AppRole)}>
-              <option value="parent">parent</option>
-              <option value="therapist">therapist</option>
-              <option value="psychologist">psychologist</option>
-              <option value="clinical_admin">clinical_admin</option>
-              <option value="super_admin">super_admin</option>
-              <option value="support_staff">support_staff</option>
-              <option value="auditor">auditor</option>
-            </select>
-          </label>
+          <div className="auth-user-block">
+            <span className="auth-display-name">{authSession.displayName}</span>
+            <span className="auth-role-badge">{role}</span>
+            <button className="auth-logout-btn" type="button" onClick={onLogout}>Sign out</button>
+          </div>
         </div>
         <nav className="nav-list grouped" aria-label="Primary">
           {visibleNavGroups.map((group) => (
