@@ -1273,12 +1273,13 @@ export function App() {
     setPath("/login");
   }
 
-  // Show auth screens before the shell
-  if (!authSession || path === "/login") {
-    return <LoginScreen onLogin={onLogin} onGoSignup={() => { window.history.pushState(null, "", "/signup"); setPath("/signup"); }} />;
-  }
+  // Show auth screens before the shell — signup must be checked first
+  // because !authSession is true on both /login and /signup
   if (path === "/signup") {
     return <SignupScreen onLogin={onLogin} onGoLogin={() => { window.history.pushState(null, "", "/login"); setPath("/login"); }} />;
+  }
+  if (!authSession || path === "/login") {
+    return <LoginScreen onLogin={onLogin} onGoSignup={() => { window.history.pushState(null, "", "/signup"); setPath("/signup"); }} />;
   }
   const product = productNames.find((name) => name.active) ?? productNames[0];
   const visibleNavGroups = useMemo(() => getVisibleNavGroups(role), [role]);
