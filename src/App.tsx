@@ -419,6 +419,43 @@ async function fetchRuntimeSessionBundle(sessionId: string): Promise<RuntimeSess
   return bundle;
 }
 
+async function runFullAnalysisForSession(
+  session: ConversationSession,
+  transcriptLanguage: SupportedLanguage,
+  recommendationLanguage: SupportedLanguage,
+): Promise<RuntimeSessionBundle> {
+  const graph = await apiJson<GraphAnalysisResponse>(`/api/sessions/${session.id}/analysis/run`, {
+    method: "POST",
+    body: JSON.stringify({
+      languageCode: transcriptLanguage,
+      coachingLanguage: recommendationLanguage,
+    }),
+  });
+
+  const [turns, parentAnalysis, childAnalysis, riskAssessment] = await Promise.all([
+    apiJson<ConversationTurn[]>(`/api/sessions/${session.id}/turns`),
+    apiJson<ParentAnalysisResponse>(`/api/sessions/${session.id}/parent-analysis`),
+    apiJson<ChildAnalysisResponse>(`/api/sessions/${session.id}/child-analysis`),
+    apiJson<RiskAssessmentResponse>(`/api/sessions/${session.id}/risk-assessment`, {
+      method: "POST",
+      body: JSON.stringify({ geminiSafetyAnalysisEnabled: false }),
+    }),
+  ]);
+
+  const bundle: RuntimeSessionBundle = {
+    session,
+    turns,
+    speakerTagsDetected: turns.every((turn) => turn.speaker !== "unknown"),
+    graph,
+    parentAnalysis,
+    childAnalysis,
+    riskAssessment,
+  };
+
+  saveRuntimeSession(bundle);
+  return bundle;
+}
+
 type PrivacyAuditLogItem = {
   id: string;
   familyId: string;
@@ -1364,21 +1401,87 @@ function DashboardScreen() {
 }
 
 function RecordScreen() {
+  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const [conversationLanguage, setConversationLanguage] = useState<SupportedLanguage>("en-IN");
   const [isRecording, setIsRecording] = useState(false);
   const [sessionNote, setSessionNote] = useState("");
   const [analysisQueued, setAnalysisQueued] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(null);
   const hasTranscriptPreview = liveTranscriptPreview.length > 0;
+
+  const persistRecordedSession = async () => {
+    if (!hasTranscriptPreview) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+    setAnalysisQueued(true);
+
+    try {
+      const session = await apiJson<ConversationSession>("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          childId: selectedChildId,
+          createdByUserId: "parent_demo_1",
+          situationType: selectedSituation,
+          language: conversationLanguage,
+          durationSeconds: liveTranscriptPreview.length * 10,
+          inputMode: "live_audio",
+          audioStoragePath: null,
+          transcriptStatus: "uploaded",
+          riskLevel: "low",
+          overallPattern: sessionNote || "Live recorded conversation ready for analysis",
+        }),
+      });
+
+      await apiJson(`/api/sessions/${session.id}/turns`, {
+        method: "POST",
+        body: JSON.stringify({
+          turns: liveTranscriptPreview.map((line, index) => ({
+            id: `live_turn_${index + 1}`,
+            speaker: line.speaker.toLowerCase() === "parent" ? "parent" : line.speaker.toLowerCase() === "child" ? "child" : "unknown",
+            startTimeSec: index * 10,
+            endTimeSec: index * 10 + 8,
+            text: line.text,
+            originalText: line.text,
+            originalLanguage: conversationLanguage,
+            emotionLabel: "",
+            toneLabel: "",
+            intentLabel: "",
+            conversationAct: "transcript_turn",
+            escalationScore: 0,
+            repairOpportunity: "",
+            suggestedReframe: "",
+          })),
+        }),
+      });
+
+      const bundle = await runFullAnalysisForSession(session, conversationLanguage, "hi-IN");
+      setRuntimeBundle(bundle);
+      setIsRecording(false);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Could not save recorded session.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <section className="stack">
       <IntakeCards active="record" />
       <Panel title="Record Now">
         <div className="form-grid">
-          <label>Child<select>{childOptions.map((child) => <option key={child.id}>{child.label}</option>)}</select></label>
-          <label>Situation<select>{situationOptions.map((situation) => <option key={situation.id}>{situation.label}</option>)}</select></label>
-          <label>Conversation language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+          <label>Child<select value={selectedChildId} onChange={(event) => setSelectedChildId(event.target.value)}>{childOptions.map((child) => <option key={child.id} value={child.id}>{child.label}</option>)}</select></label>
+          <label>Situation<select value={selectedSituation} onChange={(event) => setSelectedSituation(event.target.value as typeof situationOptions[number]["id"])}>{situationOptions.map((situation) => <option key={situation.id} value={situation.id}>{situation.label}</option>)}</select></label>
+          <label>Conversation language<select value={conversationLanguage} onChange={(event) => setConversationLanguage(event.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
           <p className="muted">The selected language is stored on the ConversationSession and sent as `languageCode` to the transcription provider.</p>
           <div className="global-banner">This session uses live audio-to-text. Raw audio is not stored.</div>
+          {submitError ? <div className="warning">{submitError}</div> : null}
           <div className="warning">Consent reminder: everyone being recorded should know the recording is happening and why.</div>
           <div className="recorder-surface">
             <strong>2-5 minute guided conversation</strong>
@@ -1427,16 +1530,13 @@ function RecordScreen() {
           </section>
           <label>Session note<textarea value={sessionNote} onChange={(event) => setSessionNote(event.target.value)} placeholder="Add situation context. Do not add diagnosis labels." /></label>
           <div className="action-row">
-            <button
+              <button
               className="secondary-action"
               type="button"
-              disabled={!hasTranscriptPreview}
-              onClick={() => {
-                setIsRecording(false);
-                setAnalysisQueued(true);
-              }}
+              disabled={!hasTranscriptPreview || isSubmitting}
+              onClick={() => void persistRecordedSession()}
             >
-              Finish and analyze session
+              {isSubmitting ? "Saving and analyzing..." : "Finish and analyze session"}
             </button>
             <span className="muted">
               {hasTranscriptPreview
@@ -1446,13 +1546,89 @@ function RecordScreen() {
           </div>
         </div>
       </Panel>
+      {runtimeBundle ? (
+        <Panel title="Recorded Session Results">
+          <div className="action-row">
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}`}>Session detail</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/graph`}>Conversation graph</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/parent`}>Parent coaching</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/child`}>Child coaching</a>
+          </div>
+        </Panel>
+      ) : null}
     </section>
   );
 }
 
 function UploadAudioScreen() {
-  const [fileMeta, setFileMeta] = useState<{ name: string; size: string; type: string } | null>(null);
+  const [fileMeta, setFileMeta] = useState<{ name: string; sizeLabel: string; sizeBytes: number; type: string } | null>(null);
+  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const [conversationLanguage, setConversationLanguage] = useState<SupportedLanguage>("en-IN");
   const [uploadRequested, setUploadRequested] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(null);
+
+  const normalizeAudioMimeType = (type: string): "audio/webm" | "audio/wav" | "audio/mp3" | "audio/mpeg" | "audio/mp4" | "audio/m4a" => {
+    if (type === "audio/webm" || type === "audio/wav" || type === "audio/mp3" || type === "audio/mpeg" || type === "audio/mp4" || type === "audio/m4a") {
+      return type;
+    }
+    return "audio/mp4";
+  };
+
+  const uploadAndTranscribe = async () => {
+    if (!fileMeta) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+    setUploadRequested(true);
+
+    try {
+      const session = await apiJson<ConversationSession>("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          childId: selectedChildId,
+          createdByUserId: "parent_demo_1",
+          situationType: selectedSituation,
+          language: conversationLanguage,
+          durationSeconds: 120,
+          inputMode: "uploaded_audio_transient",
+          audioStoragePath: null,
+          transcriptStatus: "uploaded",
+          riskLevel: "low",
+          overallPattern: "Audio uploaded for one-time transcription",
+        }),
+      });
+
+      await apiJson(`/api/sessions/${session.id}/audio/upload`, {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: fileMeta.name,
+          mimeType: normalizeAudioMimeType(fileMeta.type),
+          fileSizeBytes: fileMeta.sizeBytes,
+          estimatedDurationSeconds: 120,
+        }),
+      });
+
+      await apiJson(`/api/sessions/${session.id}/audio/mock-transcribe`, {
+        method: "POST",
+        body: JSON.stringify({
+          languageCode: conversationLanguage,
+        }),
+      });
+
+      const bundle = await runFullAnalysisForSession(session, conversationLanguage, "hi-IN");
+      setRuntimeBundle(bundle);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Could not upload audio.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <section className="stack">
@@ -1461,23 +1637,25 @@ function UploadAudioScreen() {
         <Panel title="Upload Audio for One-Time Transcription">
           <div className="form-grid">
             <div className="global-banner">The uploaded file will be used only to create a transcript and then deleted.</div>
-            <label>Child<select>{childOptions.map((child) => <option key={child.id}>{child.label}</option>)}</select></label>
-            <label>Situation<select>{situationOptions.map((situation) => <option key={situation.id}>{situation.label}</option>)}</select></label>
-            <label>Conversation language<select defaultValue="en-IN">{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
+            <label>Child<select value={selectedChildId} onChange={(event) => setSelectedChildId(event.target.value)}>{childOptions.map((child) => <option key={child.id} value={child.id}>{child.label}</option>)}</select></label>
+            <label>Situation<select value={selectedSituation} onChange={(event) => setSelectedSituation(event.target.value as typeof situationOptions[number]["id"])}>{situationOptions.map((situation) => <option key={situation.id} value={situation.id}>{situation.label}</option>)}</select></label>
+            <label>Conversation language<select value={conversationLanguage} onChange={(event) => setConversationLanguage(event.target.value as SupportedLanguage)}>{languages.map((language) => <option value={language.code} key={language.code}>{language.label}</option>)}</select></label>
             <label>Phone recorder file<input type="file" accept={supportedAudioFormats} onChange={(event) => {
               const file = event.target.files?.[0];
               setUploadRequested(false);
-              setFileMeta(file ? { name: file.name, size: formatBytes(file.size), type: file.type || "unknown" } : null);
+              setSubmitError(null);
+              setFileMeta(file ? { name: file.name, sizeLabel: formatBytes(file.size), sizeBytes: file.size, type: file.type || "audio/mp4" } : null);
             }} /></label>
             <div className="drop-zone">Supported formats: webm, wav, mp3, mpeg, mp4, m4a</div>
+            {submitError ? <div className="warning">{submitError}</div> : null}
             <div className="action-row">
               <button
                 className="secondary-action"
                 type="button"
-                disabled={!fileMeta}
-                onClick={() => setUploadRequested(true)}
+                disabled={!fileMeta || isSubmitting}
+                onClick={() => void uploadAndTranscribe()}
               >
-                Upload and transcribe
+                {isSubmitting ? "Uploading and transcribing..." : "Upload and transcribe"}
               </button>
               <span className="muted">
                 {fileMeta
@@ -1490,7 +1668,7 @@ function UploadAudioScreen() {
         </Panel>
         <Panel title="Validation & Storage">
           <MetricRow label="Selected file" value={fileMeta?.name ?? "None"} />
-          <MetricRow label="File size" value={fileMeta?.size ?? "Waiting"} />
+          <MetricRow label="File size" value={fileMeta?.sizeLabel ?? "Waiting"} />
           <MetricRow label="MIME type" value={fileMeta?.type ?? "Waiting"} />
           <MetricRow label="Estimated duration" value="Validated by API metadata" />
           <MetricRow label="Upload state" value={!fileMeta ? "Waiting for file" : uploadRequested ? "Ready to transcribe" : "Ready for upload"} />
@@ -1502,6 +1680,16 @@ function UploadAudioScreen() {
           ))}
         </Panel>
       </section>
+      {runtimeBundle ? (
+        <Panel title="Uploaded Audio Results">
+          <div className="action-row">
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}`}>Session detail</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/graph`}>Conversation graph</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/parent`}>Parent coaching</a>
+            <a className="button-link" href={`/sessions/${runtimeBundle.session.id}/child`}>Child coaching</a>
+          </div>
+        </Panel>
+      ) : null}
     </section>
   );
 }

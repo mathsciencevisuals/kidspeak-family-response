@@ -97,6 +97,10 @@ const multilingualAnalysisPayloadSchema = z.object({
   languageCode: z.enum(["en-IN", "hi-IN", "te-IN", "ta-IN"]),
   coachingLanguage: z.enum(["en-IN", "hi-IN", "te-IN", "ta-IN"]),
 });
+const mockAudioTranscriptionPayloadSchema = z.object({
+  languageCode: z.enum(["en-IN", "hi-IN", "te-IN", "ta-IN"]).default("en-IN"),
+  sampleTranscript: z.string().min(1).optional(),
+});
 const parentPracticePlanPayloadSchema = z.object({
   coachingLanguage: z.enum(["en-IN", "hi-IN", "te-IN", "ta-IN"]).default("en-IN"),
 });
@@ -902,6 +906,24 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return json(response, 201, {
       ...publicUpload,
       storagePathExposed: false,
+    });
+  }
+
+  const mockAudioTranscriptionSessionId = matchNestedSessionRoute(path, "audio/mock-transcribe");
+  if (method === "POST" && mockAudioTranscriptionSessionId) {
+    const body = mockAudioTranscriptionPayloadSchema.parse(await readJson(request));
+    const transcript = body.sampleTranscript ?? [
+      "Parent: Please start with the first question.",
+      "Child: I do not know how to start.",
+      "Parent: Let us do one question together.",
+    ].join("\n");
+    const turns = normalizeTranscript(transcript, mockAudioTranscriptionSessionId, body.languageCode);
+    const savedTurns = await repository.saveTranscriptTurns(mockAudioTranscriptionSessionId, turns);
+    return json(response, 201, {
+      turns: savedTurns,
+      provider: "mock",
+      transcriptionSkipped: false,
+      nextAction: "Run Analysis",
     });
   }
 
