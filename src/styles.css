@@ -1014,14 +1014,85 @@ textarea {
   width: fit-content;
 }
 
-.status-chip.accepted {
+.status-chip.accepted,
+.status-chip.status-green,
+.status-chip.active,
+.status-chip.all_granted,
+.status-chip.healthy {
   background: #e9f0ea;
   color: #20352b;
 }
 
-.status-chip.revoked {
+.status-chip.revoked,
+.status-chip.status-red,
+.status-chip.suspended,
+.status-chip.critical,
+.status-chip.none {
   background: #fff0f0;
   color: #551b1b;
+}
+
+.status-chip.status-yellow,
+.status-chip.partial,
+.status-chip.pending,
+.status-chip.medium {
+  background: #fffbe6;
+  color: #5c4200;
+}
+
+.admin-table {
+  border: 1px solid #dde3d6;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.admin-table-header,
+.admin-table-row {
+  display: grid;
+  gap: 0;
+  padding: 10px 16px;
+}
+
+.admin-table-header {
+  background: #f0f2ec;
+  border-bottom: 1px solid #dde3d6;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #4a5e52;
+}
+
+.admin-table-row {
+  border-bottom: 1px solid #f0f2ec;
+  align-items: center;
+  font-size: 14px;
+}
+
+.admin-table-row:last-child {
+  border-bottom: none;
+}
+
+.admin-table-row:hover {
+  background: #f8fbf3;
+}
+
+.admin-table-row small {
+  color: #7a8c80;
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.admin-table-row .action-cell {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.metric-warning {
+  color: #a05a00;
+  font-weight: 700;
 }
 
 .evidence-grid {

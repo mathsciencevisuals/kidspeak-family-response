@@ -522,6 +522,124 @@ The original Firestore repository adapters remain in `src/repositories/familyRep
 - No ads based on child behaviour.
 - No selling or sharing child behavioural data.
 
+## Step 7: Admin, Therapist Admin, and Control Plane Screens
+
+Step 7 adds the full admin and governance control plane to KidSpeak. Every screen is wired to Firestore (not Redis), uses mock data fallback, and enforces the no-raw-audio policy throughout.
+
+### New Screen Modules
+
+| Module | Route | Role Access | Purpose |
+| --- | --- | --- | --- |
+| Admin Home | `/admin` | super_admin, clinical_admin | Governance overview: platform status, usage metrics, privacy health, safety health, quick actions. |
+| Users Admin | `/admin/users` | super_admin | List, suspend, and update roles for all platform users. Break-glass access creates an audit event. |
+| Families Admin | `/admin/families` | super_admin, clinical_admin | View family records, consent status, risk levels, therapist assignments, and audio-stored count (enforced zero). |
+| Therapists Admin | `/admin/therapists` | super_admin, clinical_admin | View therapist accounts, license status, assigned family count, pending reviews, and consent-scope policy. |
+| Infrastructure Admin | `/admin/infrastructure` | super_admin, support_staff | Show Cloud Run, Firestore, Firebase Auth, STT, Gemini, Redis (disabled), and mock-mode service status with feature flag toggles. |
+| Cost Admin | `/admin/cost` | super_admin, clinical_admin | Monitor sessions, STT minutes, cached AI results, rate limits, daily cost estimates, and hard/soft caps. |
+| Language Admin | `/admin/languages` | super_admin, clinical_admin, therapist | Manage language dictionary entries, phrase categories, clinical review status, and child-friendly wording for en-IN, hi-IN, te-IN, ta-IN. |
+| Role Admin | `/admin/roles` | super_admin, clinical_admin | Review RBAC role permissions, break-glass policy, and access scope descriptions for all nine roles. |
+| Safety Rules Admin | `/admin/safety-rules` | super_admin, clinical_admin, therapist | Manage multilingual safety phrase rules, severity, blocked-coaching flag, and professional review response templates. |
+| Prompt Admin | `/admin/prompts` | super_admin, clinical_admin, therapist, auditor | View and manage approved prompt versions with safety notes, review status, and change history. |
+| Audit Logs | `/admin/audit-logs` | super_admin, auditor | Review governance, consent, break-glass, therapist access, data-deletion, and data-export events with severity indicators. |
+| Feature Flags | `/admin/feature-flags` | super_admin, support_staff | Toggle MVP feature flags. STORE_RAW_AUDIO requires a stated reason and shows a compliance warning before enabling. |
+| Privacy & Compliance | `/admin/privacy`, `/admin/compliance` | super_admin, clinical_admin, auditor | Review consent templates, retention policy, pending deletion requests, and compliance control status. |
+
+### Therapist Admin Screens
+
+| Screen | Route | Purpose |
+| --- | --- | --- |
+| Therapist Admin Home | `/therapist/admin` | Case operations overview: assigned families, active cases, risk queue count, and recent session reviews. |
+| Families | `/therapist/admin/families` | List consented assigned families with last session, risk level, and consent status. |
+| Cases | `/therapist/admin/cases` | Manage active cases, therapist notes, and practice assignments. |
+| Session Review | `/therapist/admin/session-review` | Transcript, graph, coaching observations, risk assessment, and clinical notes. |
+| Risk Queue | `/therapist/admin/risk-queue` | Sessions where professional review is recommended, sorted by severity. |
+| Practice Library | `/therapist/admin/practice-library` | Reusable home-practice templates: validation, regulation, repair, boundary, screen-time, homework. |
+| Progress Reports | `/therapist/admin/progress-reports` | Printable progress summaries generated from cached session observations. |
+| Notes Templates | `/therapist/admin/notes-templates` | Reusable professional note templates for structured clinical documentation. |
+
+### Parent Settings Screens
+
+| Screen | Route | Purpose |
+| --- | --- | --- |
+| Consent | `/settings/consent` | Grant or revoke recording, therapist sharing, data retention, and research opt-in. |
+| Privacy | `/settings/privacy` | Privacy principles, child-friendly notice, export, and deletion controls. |
+| Language | `/settings/language` | UI language, transcript language, coaching language, and child-friendly language preference. |
+| Therapist Sharing | `/settings/therapist-sharing` | Manage therapist_share consent and view assigned therapists. |
+| Export Data | `/settings/export-data` | Export session summaries, transcript turns, recommendations, and parent-visible therapist notes. |
+| Delete Data | `/settings/delete-data` | Request one-session, child-profile, or all-family data deletion with an audit event. |
+
+### RBAC Rules
+
+| Role | Access |
+| --- | --- |
+| super_admin | Full platform access. Break-glass access to sensitive records requires reason + audit event. |
+| clinical_admin | Risk queue, language/prompt/safety-rule management, family governance view. |
+| therapist / psychologist | Assigned consented families only. Cannot view unassigned families. |
+| school_counselor | School-assigned students only, no raw data. |
+| parent | Own family only. |
+| child | Child-friendly pages only. |
+| support_staff | Non-sensitive operational pages. No transcripts, coaching data, or child-sensitive routes. |
+| auditor | Audit logs and compliance read-only. No user, family, or transcript data. |
+
+RBAC helpers are in `src/lib/rbac.ts`. The `canAccessPath`, `canViewTranscripts`, `canManagePlatform`, `canManageUsers`, and `canViewAuditLogs` functions are used by both the frontend route guards and the API server.
+
+### Firestore Collections Used
+
+| Collection | Purpose |
+| --- | --- |
+| `admin_users` | Admin user account records. |
+| `admin_families` | Admin family governance records (no raw transcript, no audio URLs). |
+| `admin_therapists` | Admin therapist account and assignment records. |
+| `admin_break_glass` | Break-glass access events with reason and audit context. |
+| `kidspeak_kv` | Key-value store via Firestore REST for session state, cache, rate limits, and audit logs. |
+| `kidspeak_sets` | Set index via Firestore REST for session membership and audit event index. |
+
+### No-Raw-Audio Guarantee in Admin Views
+
+The Families Admin module shows `audioStoredCount` for every family record. This value is enforced as `0` when `STORE_RAW_AUDIO=false`. The Feature Flags Admin shows `STORE_RAW_AUDIO=false` as a locked default. The Infrastructure Admin shows `No-audio-storage status: enforced`. Session metadata always includes `audioStored: false`. No audio player is rendered when raw audio storage is disabled.
+
+### New API Routes
+
+```
+GET  /api/admin/users                 List all user accounts
+GET  /api/admin/users/:id             Get one user
+PATCH /api/admin/users/:id/role       Update user role (super_admin only)
+POST  /api/admin/users/:id/suspend    Suspend user (super_admin only)
+GET  /api/admin/families              List all family governance records
+GET  /api/admin/families/:id          Get one family record
+GET  /api/admin/therapists            List all therapist accounts
+GET  /api/admin/therapists/:id        Get one therapist
+POST /api/admin/break-glass           Record a break-glass access event
+GET  /api/admin/break-glass           List break-glass events
+```
+
+Admin routes require role `admin`, `super_admin`, or `clinical_admin` in the `x-user-role` header.
+
+### Low-Cost GCP Architecture Choices
+
+- Firestore is the default for all MVP data: session state, cache, rate counters, admin records, audit logs, and therapist notes.
+- Redis/Memorystore is disabled by default (`ENABLE_REDIS=false`). Enabling it adds always-on infrastructure cost.
+- BigQuery is not used. Trend insights are deterministic calculations from Firestore session metrics.
+- Cloud SQL is not used. Firestore document model fits the family / session / turn hierarchy without a relational schema.
+- Cloud Run min instances = 0. The service scales to zero between requests.
+- Gemini / Vertex AI is called only when a user explicitly clicks an AI action. It is not called on page load.
+- Rule-based analysis (parent patterns, child coaching, safety pre-check) runs before any AI call.
+- AI outputs are cached by input hash in Firestore to avoid repeated inference cost.
+- Raw audio is not stored. Audio is used transiently for transcription and then discarded.
+- Transcript upload is the lowest-cost input path: no STT cost.
+
+### Running Admin Tests
+
+```bash
+npm test
+```
+
+The test suite includes:
+
+- `src/services/noAudioStorage.test.ts` — verifies `audioStoragePath=null` and `audioPersisted=false` when `STORE_RAW_AUDIO=false`.
+- `src/services/noAudioStorageUi.test.ts` — verifies no audio player is rendered in the session UI.
+- `src/services/adminAudit.test.ts` — verifies AdminRepository CRUD, break-glass events, RBAC helper functions, and no-audio compliance in admin family records.
+
 ## Local Development
 
 ```bash

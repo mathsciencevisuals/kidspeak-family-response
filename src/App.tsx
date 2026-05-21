@@ -662,6 +662,71 @@ const adminDashboardMock = {
   },
 };
 
+type UserAdminRecord = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: string;
+  status: "active" | "suspended" | "pending";
+  familyId?: string;
+  lastActiveAt: string;
+  createdAt: string;
+  mfaEnabled: boolean;
+  consentCount: number;
+};
+
+type FamilyAdminRecord = {
+  id: string;
+  displayName: string;
+  ownerEmail: string;
+  memberCount: number;
+  childCount: number;
+  sessionCount: number;
+  consentStatus: "all_granted" | "partial" | "none";
+  therapistAssigned: boolean;
+  therapistId?: string;
+  riskLevel: "low" | "medium" | "high" | "critical";
+  lastSessionAt: string;
+  createdAt: string;
+  audioStoredCount: number;
+};
+
+type TherapistAdminRecord = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "therapist" | "psychologist" | "school_counselor";
+  status: "active" | "inactive";
+  assignedFamilyCount: number;
+  activeCaseCount: number;
+  pendingReviewCount: number;
+  lastActivityAt: string;
+  createdAt: string;
+  licenseVerified: boolean;
+  consentScopeOnly: boolean;
+};
+
+const adminUsersDemo: UserAdminRecord[] = [
+  { id: "user_admin_1", email: "priya@kidspeak.in", displayName: "Priya Sharma", role: "clinical_admin", status: "active", lastActiveAt: "2026-05-21 09:12", createdAt: "2025-12-01", mfaEnabled: true, consentCount: 0 },
+  { id: "user_parent_rao", email: "rao@example.in", displayName: "Vikram Rao", role: "parent", status: "active", familyId: "family-demo-1", lastActiveAt: "2026-05-20 18:40", createdAt: "2026-01-15", mfaEnabled: false, consentCount: 4 },
+  { id: "user_parent_meena", email: "meena@example.in", displayName: "Meena Iyer", role: "parent", status: "active", familyId: "family-demo-2", lastActiveAt: "2026-05-19 10:05", createdAt: "2026-02-03", mfaEnabled: false, consentCount: 3 },
+  { id: "user_therapist_1", email: "dr.arjun@clinic.in", displayName: "Dr. Arjun Pillai", role: "therapist", status: "active", lastActiveAt: "2026-05-21 11:30", createdAt: "2026-01-10", mfaEnabled: true, consentCount: 0 },
+  { id: "user_auditor_1", email: "audit@kidspeak.in", displayName: "Compliance Auditor", role: "auditor", status: "active", lastActiveAt: "2026-05-18 14:00", createdAt: "2026-03-01", mfaEnabled: true, consentCount: 0 },
+  { id: "user_support_1", email: "support@kidspeak.in", displayName: "Support Staff", role: "support_staff", status: "active", lastActiveAt: "2026-05-20 09:00", createdAt: "2026-01-20", mfaEnabled: false, consentCount: 0 },
+];
+
+const adminFamiliesDemo: FamilyAdminRecord[] = [
+  { id: "family-demo-1", displayName: "Rao Family", ownerEmail: "rao@example.in", memberCount: 3, childCount: 2, sessionCount: 8, consentStatus: "all_granted", therapistAssigned: true, therapistId: "user_therapist_1", riskLevel: "low", lastSessionAt: "2026-05-20 18:40", createdAt: "2026-01-15", audioStoredCount: 0 },
+  { id: "family-demo-2", displayName: "Iyer Family", ownerEmail: "meena@example.in", memberCount: 2, childCount: 1, sessionCount: 4, consentStatus: "partial", therapistAssigned: false, riskLevel: "medium", lastSessionAt: "2026-05-19 10:05", createdAt: "2026-02-03", audioStoredCount: 0 },
+  { id: "family-demo-3", displayName: "Sharma Family", ownerEmail: "sharma@example.in", memberCount: 4, childCount: 2, sessionCount: 2, consentStatus: "none", therapistAssigned: false, riskLevel: "low", lastSessionAt: "2026-05-10 15:00", createdAt: "2026-03-15", audioStoredCount: 0 },
+];
+
+const adminTherapistsDemo: TherapistAdminRecord[] = [
+  { id: "user_therapist_1", email: "dr.arjun@clinic.in", displayName: "Dr. Arjun Pillai", role: "therapist", status: "active", assignedFamilyCount: 3, activeCaseCount: 2, pendingReviewCount: 1, lastActivityAt: "2026-05-21 11:30", createdAt: "2026-01-10", licenseVerified: true, consentScopeOnly: true },
+  { id: "user_therapist_2", email: "dr.kavitha@clinic.in", displayName: "Dr. Kavitha Nair", role: "psychologist", status: "active", assignedFamilyCount: 5, activeCaseCount: 4, pendingReviewCount: 2, lastActivityAt: "2026-05-20 16:00", createdAt: "2026-01-12", licenseVerified: true, consentScopeOnly: true },
+  { id: "user_counselor_1", email: "counselor@school.in", displayName: "School Counselor Rajan", role: "school_counselor", status: "active", assignedFamilyCount: 8, activeCaseCount: 6, pendingReviewCount: 0, lastActivityAt: "2026-05-19 09:00", createdAt: "2026-02-01", licenseVerified: false, consentScopeOnly: true },
+];
+
 const liveTranscriptPreview = [
   { speaker: "Parent", text: "Please start with the first question." },
   { speaker: "Child", text: "I do not know how to start." },
@@ -3384,10 +3449,14 @@ function TherapistNotesTemplateScreen() {
 
 function PlatformAdminScreen({ path, role }: { path: string; role: AppRole }) {
   const section = path.split("/").at(-1) ?? "admin";
+  const handledSections = ["languages", "roles", "prompts", "safety-rules", "privacy", "compliance", "infrastructure", "feature-flags", "audit-logs", "users", "families", "therapists"];
   return (
     <section className="stack">
       <AdminRouteGrid title="Platform Admin Routes" routes={platformAdminRoutes} />
       {path === "/admin" ? <AdminHomeScreen /> : null}
+      {section === "users" ? <AdminUsersModule role={role} /> : null}
+      {section === "families" ? <AdminFamiliesModule role={role} /> : null}
+      {section === "therapists" ? <AdminTherapistsModule role={role} /> : null}
       {section === "languages" ? <LanguageAdminModule role={role} /> : null}
       {section === "roles" ? <RoleAdminModule role={role} /> : null}
       {section === "prompts" ? <PromptAdminModule role={role} /> : null}
@@ -3396,12 +3465,12 @@ function PlatformAdminScreen({ path, role }: { path: string; role: AppRole }) {
       {section === "infrastructure" ? <InfrastructureAdminModule /> : null}
       {section === "feature-flags" ? <FeatureFlagsAdminModule role={role} /> : null}
       {section === "audit-logs" ? <AuditLogsAdminModule role={role} /> : null}
-      {path !== "/admin" && !["languages", "roles", "prompts", "safety-rules", "privacy", "compliance", "infrastructure", "feature-flags", "audit-logs"].includes(section) ? (
+      {path !== "/admin" && !handledSections.includes(section) ? (
         <Panel title="Admin Overview">
           <MetricRow label="Current section" value={section.replaceAll("-", " ")} />
-          <MetricRow label="Firestore" value="MVP source for session state, job status, cache, rate counters, transcript storage and audit logs" />
+          <MetricRow label="Firestore" value="MVP primary data store. No Redis by default." />
           <MetricRow label="Redis/Memorystore" value="Disabled unless ENABLE_REDIS=true" />
-          <MetricRow label="Raw audio" value="Not stored by default" />
+          <MetricRow label="Raw audio" value="Not stored. STORE_RAW_AUDIO=false enforced." />
         </Panel>
       ) : null}
     </section>
@@ -3501,6 +3570,222 @@ function AdminQuickActionCard({ title, path }: { title: string; path: string }) 
       <strong>{title}</strong>
       <span>{path}</span>
     </a>
+  );
+}
+
+function StatusChip({ status }: { status: string }) {
+  const tone = status === "active" || status === "all_granted" || status === "healthy"
+    ? "green"
+    : status === "partial" || status === "pending" || status === "medium"
+      ? "yellow"
+      : "red";
+  return <span className={`status-chip status-${tone}`}>{status}</span>;
+}
+
+function AdminUsersModule({ role }: { role: AppRole }) {
+  const canEdit = role === "super_admin";
+  const [users, setUsers] = useState<UserAdminRecord[]>(adminUsersDemo);
+  const [breakGlassReason, setBreakGlassReason] = useState("");
+
+  function suspendUser(id: string) {
+    if (!canEdit) return;
+    setUsers((current) => current.map((u) => u.id === id ? { ...u, status: "suspended" as const } : u));
+  }
+
+  function activateUser(id: string) {
+    if (!canEdit) return;
+    setUsers((current) => current.map((u) => u.id === id ? { ...u, status: "active" as const } : u));
+  }
+
+  const activeCount = users.filter((u) => u.status === "active").length;
+  const mfaEnabledCount = users.filter((u) => u.mfaEnabled).length;
+
+  return (
+    <section className="stack">
+      <section className="grid three">
+        <Panel title="User Summary">
+          <MetricRow label="Total users" value={String(users.length)} />
+          <MetricRow label="Active" value={String(activeCount)} />
+          <MetricRow label="MFA enabled" value={`${mfaEnabledCount} / ${users.length}`} />
+          <MetricRow label="Firestore collection" value="admin_users" />
+        </Panel>
+        <Panel title="Break-Glass Access">
+          <p className="muted">Super admin accessing sensitive user records requires a stated reason. This creates an audit event.</p>
+          <div className="form-grid">
+            <label>Reason for access
+              <textarea
+                value={breakGlassReason}
+                onChange={(e) => setBreakGlassReason(e.target.value)}
+                placeholder="Required for accessing sensitive user data."
+                disabled={!canEdit}
+              />
+            </label>
+          </div>
+          <MetricRow label="Audit event" value={breakGlassReason.trim() ? "Will be created on action" : "Not yet stated"} />
+        </Panel>
+        <Panel title="RBAC Policy">
+          <MetricRow label="super_admin" value="Full platform access" />
+          <MetricRow label="clinical_admin" value="Risk queue and clinical config" />
+          <MetricRow label="therapist" value="Assigned consented families only" />
+          <MetricRow label="support_staff" value="No transcripts or coaching data" />
+          <MetricRow label="auditor" value="Audit logs read-only" />
+          <MetricRow label="parent" value="Own family only" />
+          <MetricRow label="child" value="Child-friendly pages only" />
+        </Panel>
+      </section>
+      <Panel title="User Accounts">
+        <div className="admin-table">
+          <div className="admin-table-header">
+            <span>User</span><span>Role</span><span>Status</span><span>MFA</span><span>Last Active</span>{canEdit && <span>Actions</span>}
+          </div>
+          {users.map((user) => (
+            <div className="admin-table-row" key={user.id}>
+              <span>
+                <strong>{user.displayName}</strong>
+                <small>{user.email}</small>
+              </span>
+              <span><StatusChip status={user.role} /></span>
+              <span><StatusChip status={user.status} /></span>
+              <span>{user.mfaEnabled ? "Enabled" : "Disabled"}</span>
+              <span>{user.lastActiveAt}</span>
+              {canEdit && (
+                <span className="action-cell">
+                  {user.status === "active"
+                    ? <button className="secondary-action" type="button" onClick={() => suspendUser(user.id)}>Suspend</button>
+                    : <button className="secondary-action" type="button" onClick={() => activateUser(user.id)}>Activate</button>}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+        {!canEdit && <p className="muted">Role changes and suspension require super_admin access.</p>}
+      </Panel>
+    </section>
+  );
+}
+
+function AdminFamiliesModule({ role }: { role: AppRole }) {
+  const canView = role === "super_admin" || role === "clinical_admin";
+  const families = adminFamiliesDemo;
+
+  const noAudioCount = families.filter((f) => f.audioStoredCount === 0).length;
+  const consentedCount = families.filter((f) => f.consentStatus === "all_granted").length;
+  const highRiskCount = families.filter((f) => f.riskLevel === "high" || f.riskLevel === "critical").length;
+
+  if (!canView) {
+    return (
+      <Panel title="Access Restricted">
+        <MetricRow label="Required role" value="super_admin or clinical_admin" />
+        <p className="muted">Family records are governed under RBAC. Support staff and auditors cannot view family records.</p>
+      </Panel>
+    );
+  }
+
+  return (
+    <section className="stack">
+      <section className="grid four">
+        <Panel title="Families">
+          <MetricRow label="Total families" value={String(families.length)} />
+          <MetricRow label="All consent granted" value={String(consentedCount)} />
+          <MetricRow label="High / critical risk" value={String(highRiskCount)} />
+          <MetricRow label="Firestore collection" value="admin_families" />
+        </Panel>
+        <Panel title="Privacy Compliance">
+          <MetricRow label="Families with zero audio stored" value={`${noAudioCount} / ${families.length}`} />
+          <MetricRow label="STORE_RAW_AUDIO" value="false (enforced)" />
+          <MetricRow label="Audio stored count across all families" value={String(families.reduce((sum, f) => sum + f.audioStoredCount, 0))} />
+        </Panel>
+        <Panel title="Therapist Assignment">
+          <MetricRow label="Assigned families" value={String(families.filter((f) => f.therapistAssigned).length)} />
+          <MetricRow label="Unassigned families" value={String(families.filter((f) => !f.therapistAssigned).length)} />
+          <MetricRow label="Therapist access scope" value="Consent-only" />
+        </Panel>
+        <Panel title="Consent Status">
+          <MetricRow label="All consent granted" value={String(consentedCount)} />
+          <MetricRow label="Partial consent" value={String(families.filter((f) => f.consentStatus === "partial").length)} />
+          <MetricRow label="No consent" value={String(families.filter((f) => f.consentStatus === "none").length)} />
+        </Panel>
+      </section>
+      <Panel title="Family Records">
+        <div className="admin-table">
+          <div className="admin-table-header">
+            <span>Family</span><span>Sessions</span><span>Consent</span><span>Risk</span><span>Audio Stored</span><span>Therapist</span><span>Last Session</span>
+          </div>
+          {families.map((family) => (
+            <div className="admin-table-row" key={family.id}>
+              <span>
+                <strong>{family.displayName}</strong>
+                <small>{family.memberCount} members · {family.childCount} children</small>
+              </span>
+              <span>{family.sessionCount}</span>
+              <span><StatusChip status={family.consentStatus} /></span>
+              <span><StatusChip status={family.riskLevel} /></span>
+              <span>{family.audioStoredCount === 0 ? "None (compliant)" : String(family.audioStoredCount)}</span>
+              <span>{family.therapistAssigned ? "Assigned" : "Unassigned"}</span>
+              <span>{family.lastSessionAt}</span>
+            </div>
+          ))}
+        </div>
+        <p className="muted">Support staff cannot view this table. Transcripts and coaching data are blocked for non-clinical roles.</p>
+      </Panel>
+    </section>
+  );
+}
+
+function AdminTherapistsModule({ role }: { role: AppRole }) {
+  const canEdit = role === "super_admin";
+  const therapists = adminTherapistsDemo;
+
+  const activeCount = therapists.filter((t) => t.status === "active").length;
+  const verifiedCount = therapists.filter((t) => t.licenseVerified).length;
+  const totalPending = therapists.reduce((sum, t) => sum + t.pendingReviewCount, 0);
+
+  return (
+    <section className="stack">
+      <section className="grid three">
+        <Panel title="Therapist Summary">
+          <MetricRow label="Total therapists" value={String(therapists.length)} />
+          <MetricRow label="Active" value={String(activeCount)} />
+          <MetricRow label="License verified" value={`${verifiedCount} / ${therapists.length}`} />
+          <MetricRow label="Pending reviews (total)" value={String(totalPending)} />
+          <MetricRow label="Firestore collection" value="admin_therapists" />
+        </Panel>
+        <Panel title="Consent Scope Policy">
+          <p className="muted">Therapists see only consented, assigned families. Consent-scope is enforced at the data access layer. No therapist can view unassigned families regardless of role.</p>
+          <MetricRow label="Consent-only access" value="Enforced for all" />
+          <MetricRow label="Break-glass required" value="To access unassigned family" />
+          <MetricRow label="Audit logged" value="All therapist session views" />
+        </Panel>
+        <Panel title="Assignment Rules">
+          <MetricRow label="Assignment requires" value="Parent therapist_share consent" />
+          <MetricRow label="Revoked consent" value="Immediately removes access" />
+          <MetricRow label="Clinical admin oversight" value="Can view all assigned cases" />
+        </Panel>
+      </section>
+      <Panel title="Therapist Accounts">
+        <div className="admin-table">
+          <div className="admin-table-header">
+            <span>Therapist</span><span>Role</span><span>Status</span><span>License</span><span>Assigned Families</span><span>Active Cases</span><span>Pending Reviews</span><span>Last Active</span>
+          </div>
+          {therapists.map((therapist) => (
+            <div className="admin-table-row" key={therapist.id}>
+              <span>
+                <strong>{therapist.displayName}</strong>
+                <small>{therapist.email}</small>
+              </span>
+              <span><StatusChip status={therapist.role} /></span>
+              <span><StatusChip status={therapist.status} /></span>
+              <span>{therapist.licenseVerified ? "Verified" : "Pending"}</span>
+              <span>{therapist.assignedFamilyCount}</span>
+              <span>{therapist.activeCaseCount}</span>
+              <span className={therapist.pendingReviewCount > 0 ? "metric-warning" : ""}>{therapist.pendingReviewCount}</span>
+              <span>{therapist.lastActivityAt}</span>
+            </div>
+          ))}
+        </div>
+        {!canEdit && <p className="muted">Adding or removing therapist assignments requires super_admin access.</p>}
+      </Panel>
+    </section>
   );
 }
 

@@ -4,6 +4,7 @@ import { extname, join, normalize } from "node:path";
 import { URL } from "node:url";
 import { z, ZodError } from "zod";
 import { Sprint1Repository } from "../repositories/sprint1Repository";
+import { AdminRepository } from "../repositories/adminRepository";
 import { createSprint1StorageAdapter, getStorageProvider } from "../repositories/storageAdapter";
 import {
   conversationNodeSchema,
@@ -59,6 +60,7 @@ const port = Number(process.env.PORT ?? 8080);
 const storageProvider = getStorageProvider();
 const storage = await createSprint1StorageAdapter();
 const repository = new Sprint1Repository(storage);
+const adminRepository = new AdminRepository(storage);
 const analysisCache = new AnalysisCache(storage);
 const aiCostLogger = new AiCostLogger(storage);
 const rateLimiter = new RateLimiter(storage);
@@ -151,6 +153,76 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
 
   if (method === "GET" && path === "/api/admin/cost") {
     return json(response, 200, getCostDashboardSnapshot());
+  }
+
+  if (method === "GET" && path === "/api/admin/users") {
+    const users = await adminRepository.listUsers();
+    return json(response, 200, { users, count: users.length, firestoreCollection: "admin_users" });
+  }
+
+  if (method === "GET" && /^\/api\/admin\/users\/[^/]+$/.test(path)) {
+    const userId = path.split("/").at(-1)!;
+    const user = await adminRepository.getUser(userId);
+    return user ? json(response, 200, user) : json(response, 404, { error: "User not found" });
+  }
+
+  if (method === "PATCH" && /^\/api\/admin\/users\/[^/]+\/role$/.test(path)) {
+    const userId = path.split("/")[4];
+    const body = z.object({ role: z.string().min(1) }).parse(await readJson(request));
+    const updated = await adminRepository.updateUserRole(userId, body.role);
+    return updated ? json(response, 200, updated) : json(response, 404, { error: "User not found" });
+  }
+
+  if (method === "POST" && /^\/api\/admin\/users\/[^/]+\/suspend$/.test(path)) {
+    const userId = path.split("/")[4];
+    const suspended = await adminRepository.suspendUser(userId);
+    return suspended ? json(response, 200, suspended) : json(response, 404, { error: "User not found" });
+  }
+
+  if (method === "GET" && path === "/api/admin/families") {
+    const families = await adminRepository.listFamilies();
+    return json(response, 200, { families, count: families.length, firestoreCollection: "admin_families" });
+  }
+
+  if (method === "GET" && /^\/api\/admin\/families\/[^/]+$/.test(path)) {
+    const familyId = path.split("/").at(-1)!;
+    const family = await adminRepository.getFamily(familyId);
+    return family ? json(response, 200, family) : json(response, 404, { error: "Family not found" });
+  }
+
+  if (method === "GET" && path === "/api/admin/therapists") {
+    const therapists = await adminRepository.listTherapists();
+    return json(response, 200, { therapists, count: therapists.length, firestoreCollection: "admin_therapists" });
+  }
+
+  if (method === "GET" && /^\/api\/admin\/therapists\/[^/]+$/.test(path)) {
+    const therapistId = path.split("/").at(-1)!;
+    const therapist = await adminRepository.getTherapist(therapistId);
+    return therapist ? json(response, 200, therapist) : json(response, 404, { error: "Therapist not found" });
+  }
+
+  if (method === "POST" && path === "/api/admin/break-glass") {
+    const body = z.object({
+      reason: z.string().min(10),
+      resourceType: z.enum(["user", "family", "session", "audit_log"]),
+      resourceId: z.string().min(1),
+    }).parse(await readJson(request));
+    const actorUserId = request.headers["x-user-id"]?.toString() ?? "anonymous";
+    const actorRole = request.headers["x-user-role"]?.toString() ?? "unknown";
+    const event = await adminRepository.recordBreakGlassEvent(
+      actorUserId,
+      actorRole,
+      body.reason,
+      body.resourceType,
+      body.resourceId,
+      "hashed-ip",
+    );
+    return json(response, 201, event);
+  }
+
+  if (method === "GET" && path === "/api/admin/break-glass") {
+    const events = await adminRepository.listBreakGlassEvents();
+    return json(response, 200, { events, count: events.length });
   }
 
   if (method === "POST" && path === "/api/strategy/generate-gtm-plan") {
@@ -1270,7 +1342,7 @@ function authorizeRequest(
   if (path.startsWith("/api/therapist/") && !["therapist", "psychologist", "admin"].includes(context.userRole)) {
     return false;
   }
-  if (path.startsWith("/api/admin/") && context.userRole !== "admin") {
+  if (path.startsWith("/api/admin/") && !["admin", "super_admin", "clinical_admin"].includes(context.userRole)) {
     return false;
   }
   return true;
