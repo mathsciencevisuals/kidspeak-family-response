@@ -2433,10 +2433,9 @@ function TrendsScreen() {
 
 function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
   const resolvedSessionId = sessionId ?? latestRuntimeSessionId() ?? "";
-  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(() =>
-    resolvedSessionId ? loadRuntimeSession(resolvedSessionId) : null,
-  );
-  const [loading, setLoading] = useState(Boolean(resolvedSessionId));
+  const localBundle = resolvedSessionId ? loadRuntimeSession(resolvedSessionId) : null;
+  const [runtimeBundle, setRuntimeBundle] = useState<RuntimeSessionBundle | null>(localBundle);
+  const [loading, setLoading] = useState(Boolean(resolvedSessionId) && !localBundle);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -2445,13 +2444,14 @@ function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    setLoading((prev) => prev);
     void (async () => {
       try {
         const bundle = await fetchRuntimeSessionBundle(resolvedSessionId);
         if (!cancelled) { setRuntimeBundle(bundle); setError(null); }
-      } catch (fetchError) {
-        if (!cancelled) setError(fetchError instanceof Error ? fetchError.message : "Could not load conversation graph.");
+      } catch {
+        // Keep showing local bundle if available; only surface error when there's nothing to show
+        if (!cancelled && !localBundle) setError("Session not found on server. Start a new session to see the graph.");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -2478,7 +2478,8 @@ function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
     return <section className="stack"><Panel title="Conversation Graph"><p className="muted">Loading session data...</p></Panel></section>;
   }
 
-  const nodes = runtimeBundle?.graph?.nodes ?? multilingualGraphNodes.map((node, index) => ({
+  const realNodes = runtimeBundle?.graph?.nodes;
+  const nodes = realNodes ?? multilingualGraphNodes.map((node, index) => ({
     id: `mock-node-${index + 1}`,
     nodeType: "coaching" as const,
     title: node.detectedPattern,
@@ -2496,8 +2497,8 @@ function ConversationGraphScreen({ sessionId }: { sessionId?: string }) {
   return (
     <section className="stack">
       {error ? <div className="warning">{error}</div> : null}
-      {!runtimeBundle?.graph && !loading && (
-        <div className="warning">Graph data not yet generated. Go to the session and run analysis first.</div>
+      {runtimeBundle && !realNodes && !loading && (
+        <div className="global-banner">Session loaded — run analysis on the session to generate a real graph. Showing example patterns below.</div>
       )}
       <Panel title="Conversation Graph">
         <div className="graph">
