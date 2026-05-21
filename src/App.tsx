@@ -2483,8 +2483,78 @@ function LocalisationScreen() {
 }
 
 function PrivacyScreen() {
+  const [auditEvents, setAuditEvents] = useState<Array<{ eventType: string; createdAt: string; details: string }>>([]);
+  const [exporting, setExporting] = useState(false);
+  const [deleteMode, setDeleteMode] = useState<"one_session" | "child_profile" | "all_family_data">("one_session");
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const events = await apiJson<Array<{ eventType: string; createdAt: string; details: string }>>("/api/audit-logs?familyId=family-demo-1");
+        if (!cancelled) {
+          setAuditEvents(events);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load audit log.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const requestExport = async () => {
+    setExporting(true);
+    setActionMessage(null);
+    setError(null);
+    try {
+      const bundle = await apiJson<{ id: string; files: Array<{ label: string }> }>("/api/privacy/export-data", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          exportTypes: ["session_summaries", "transcript", "recommendations", "parent_visible_therapist_notes"],
+        }),
+      });
+      setActionMessage(`Export bundle ${bundle.id} created with ${bundle.files.length} files.`);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Could not request export.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const requestDeletion = async () => {
+    setActionMessage(null);
+    setError(null);
+    try {
+      const latestSession = latestRuntimeSessionId();
+      if (!latestSession) {
+        throw new Error("No session available to delete yet.");
+      }
+      const deleted = await apiJson<{ sessionId: string; deleteMode: string }>("/api/privacy/delete-session", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: latestSession,
+          familyId: "family-demo-1",
+          deleteMode,
+        }),
+      });
+      setActionMessage(`Deletion request submitted for ${deleted.sessionId} using ${deleted.deleteMode}.`);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Could not request deletion.");
+    }
+  };
+
   return (
     <section className="stack">
+      {error ? <div className="warning">{error}</div> : null}
+      {actionMessage ? <div className="global-banner">{actionMessage}</div> : null}
       <section className="grid two">
         <Panel title="Child-Friendly Notice">
           <p className="notice-text">{childFriendlyNotice}</p>
@@ -2502,18 +2572,22 @@ function PrivacyScreen() {
             <li>Recommendations</li>
             <li>Therapist notes visible to parent</li>
           </ul>
-          <button className="secondary-action" type="button">Export selected data</button>
+          <button className="secondary-action" type="button" onClick={requestExport} disabled={exporting}>
+            {exporting ? "Creating export..." : "Export selected data"}
+          </button>
         </Panel>
         <Panel title="Delete Data">
           <div className="form-grid">
-            <label>Delete scope<select defaultValue="one_session"><option value="one_session">One session</option><option value="child_profile">Child profile</option><option value="all_family_data">All family data</option></select></label>
-            <button className="danger-action" type="button">Request deletion</button>
+            <label>Delete scope<select value={deleteMode} onChange={(event) => setDeleteMode(event.target.value as typeof deleteMode)}><option value="one_session">One session</option><option value="child_profile">Child profile</option><option value="all_family_data">All family data</option></select></label>
+            <button className="danger-action" type="button" onClick={requestDeletion}>Request deletion</button>
           </div>
         </Panel>
         <Panel title="Audit Log">
-          {["consent granted", "audio uploaded", "analysis run", "therapist viewed", "data exported", "data deleted"].map((event) => (
-            <MetricRow key={event} label={event} value="Tracked" />
-          ))}
+          {auditEvents.length > 0 ? auditEvents.slice(-6).reverse().map((event) => (
+            <MetricRow key={`${event.createdAt}-${event.eventType}`} label={event.eventType.replaceAll("_", " ")} value={new Date(event.createdAt).toLocaleDateString()} />
+          )) : (
+            <p className="muted">No privacy audit events yet.</p>
+          )}
         </Panel>
       </section>
     </section>
@@ -2526,16 +2600,73 @@ function ConsentSettingsScreen() {
     ["Therapist sharing consent", "therapist_share"],
     ["Data retention consent", "data_retention"],
     ["Research opt-in", "research_opt_in"],
-  ];
+  ] as const;
+  const [consents, setConsents] = useState<Array<{ id: string; consentType: string; status: string }>>([]);
+  const [savingConsent, setSavingConsent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<Array<{ id: string; consentType: string; status: string }>>("/api/privacy/consents?familyId=family-demo-1");
+        if (!cancelled) {
+          setConsents(data);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load consents.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isGranted = (consentType: string) => consents.some((consent) => consent.consentType === consentType && consent.status === "granted");
+
+  const toggleConsent = async (consentType: typeof consentRows[number][1], checked: boolean) => {
+    setSavingConsent(consentType);
+    setError(null);
+    try {
+      if (checked) {
+        await apiJson("/api/privacy/consents", {
+          method: "POST",
+          body: JSON.stringify({
+            familyId: "family-demo-1",
+            childId: "child_demo_1",
+            parentUserId: "parent_demo_1",
+            consentType,
+          }),
+        });
+      } else {
+        const active = consents.find((consent) => consent.consentType === consentType && consent.status === "granted");
+        if (active) {
+          await apiJson(`/api/privacy/consents/${active.id}`, {
+            method: "DELETE",
+          });
+        }
+      }
+      const refreshed = await apiJson<Array<{ id: string; consentType: string; status: string }>>("/api/privacy/consents?familyId=family-demo-1");
+      setConsents(refreshed);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Could not update consent.");
+    } finally {
+      setSavingConsent(null);
+    }
+  };
 
   return (
     <section className="grid two">
+      {error ? <div className="warning">{error}</div> : null}
       <Panel title="Consent Management">
         <div className="consent-list">
           {consentRows.map(([label, value]) => (
             <label className="toggle-row" key={value}>
               <span>{label}</span>
-              <input type="checkbox" defaultChecked={value !== "research_opt_in"} />
+              <input type="checkbox" checked={isGranted(value)} disabled={savingConsent === value} onChange={(event) => void toggleConsent(value, event.target.checked)} />
             </label>
           ))}
         </div>
@@ -2584,10 +2715,36 @@ function DataRetentionScreen() {
 }
 
 function TherapistSharingSettingsScreen() {
+  const [consents, setConsents] = useState<Array<{ consentType: string; status: string }>>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiJson<Array<{ consentType: string; status: string }>>("/api/privacy/consents?familyId=family-demo-1");
+        if (!cancelled) {
+          setConsents(data);
+          setError(null);
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load therapist sharing consent.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sharingGranted = consents.some((consent) => consent.consentType === "therapist_share" && consent.status === "granted");
+
   return (
     <section className="grid two">
+      {error ? <div className="warning">{error}</div> : null}
       <Panel title="Therapist Sharing Consent">
-        <MetricRow label="Sharing status" value="Consent required" />
+        <MetricRow label="Sharing status" value={sharingGranted ? "Granted" : "Consent required"} />
         <MetricRow label="Visible data" value="Summaries, transcript turns, analysis nodes, parent-visible notes" />
         <MetricRow label="Raw audio" value="Never shared by default" />
       </Panel>
@@ -2603,12 +2760,41 @@ function TherapistSharingSettingsScreen() {
 }
 
 function DeleteDataSettingsScreen() {
+  const [deleteMode, setDeleteMode] = useState<"one_session" | "child_profile" | "all_family_data">("one_session");
+  const [confirmation, setConfirmation] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const submitDeleteRequest = async () => {
+    setMessage(null);
+    setError(null);
+    try {
+      const latestSession = latestRuntimeSessionId();
+      if (!latestSession) {
+        throw new Error("No session available to delete yet.");
+      }
+      const deleted = await apiJson<{ sessionId: string; deleteMode: string }>("/api/privacy/delete-session", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: latestSession,
+          familyId: "family-demo-1",
+          deleteMode,
+        }),
+      });
+      setMessage(`Deletion request created for ${deleted.sessionId} with ${deleted.deleteMode}.`);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Could not create deletion request.");
+    }
+  };
+
   return (
     <Panel title="Delete Data">
+      {error ? <div className="warning">{error}</div> : null}
+      {message ? <div className="global-banner">{message}</div> : null}
       <div className="form-grid">
-        <label>Deletion scope<select><option>One session</option><option>Child profile</option><option>All family data</option></select></label>
-        <label>Confirmation<textarea placeholder="Describe the deletion request." /></label>
-        <button className="danger-action" type="button">Create deletion request</button>
+        <label>Deletion scope<select value={deleteMode} onChange={(event) => setDeleteMode(event.target.value as typeof deleteMode)}><option value="one_session">One session</option><option value="child_profile">Child profile</option><option value="all_family_data">All family data</option></select></label>
+        <label>Confirmation<textarea value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="Describe the deletion request." /></label>
+        <button className="danger-action" type="button" disabled={!confirmation.trim()} onClick={submitDeleteRequest}>Create deletion request</button>
       </div>
       <p className="muted">Deletion requests are audited. Raw audio is not stored by default.</p>
     </Panel>
@@ -2616,15 +2802,37 @@ function DeleteDataSettingsScreen() {
 }
 
 function ExportDataSettingsScreen() {
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestExport = async () => {
+    setMessage(null);
+    setError(null);
+    try {
+      const bundle = await apiJson<{ id: string; files: Array<{ label: string }> }>("/api/privacy/export-data", {
+        method: "POST",
+        body: JSON.stringify({
+          familyId: "family-demo-1",
+          exportTypes: ["session_summaries", "transcript", "recommendations", "parent_visible_therapist_notes"],
+        }),
+      });
+      setMessage(`Export request created: ${bundle.id} with ${bundle.files.length} files.`);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Could not request export.");
+    }
+  };
+
   return (
     <Panel title="Export Data">
+      {error ? <div className="warning">{error}</div> : null}
+      {message ? <div className="global-banner">{message}</div> : null}
       <ul className="check-list">
         <li>Session summaries</li>
         <li>Transcript turns</li>
         <li>Recommendations</li>
         <li>Therapist notes visible to parent</li>
       </ul>
-      <button className="secondary-action" type="button">Request export</button>
+      <button className="secondary-action" type="button" onClick={requestExport}>Request export</button>
       <p className="muted">Export excludes raw audio paths because raw audio is not stored by default.</p>
     </Panel>
   );
