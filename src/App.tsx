@@ -202,10 +202,33 @@ const languages = languageConfigs.map((language) => ({
   label: language.displayName,
 }));
 
-const childOptions = [
+const defaultChildOptions = [
   { id: "child_demo_1", label: "Aarav, 9-12" },
   { id: "child_demo_2", label: "Mira, 6-8" },
 ];
+
+function getChildOptions(): Array<{ id: string; label: string }> {
+  try {
+    const raw = localStorage.getItem("family_profile");
+    if (raw) {
+      const profile = JSON.parse(raw) as { children?: string[] };
+      const saved = (profile.children ?? []).filter(Boolean);
+      if (saved.length > 0) return saved.map((name, i) => ({ id: `child_${i}`, label: name }));
+    }
+  } catch {}
+  return defaultChildOptions;
+}
+
+function getDefaultSituation(): string {
+  try {
+    const raw = localStorage.getItem("family_profile");
+    if (raw) {
+      const profile = JSON.parse(raw) as { defaultSituation?: string };
+      return profile.defaultSituation ?? "homework_conflict";
+    }
+  } catch {}
+  return "homework_conflict";
+}
 
 const situationOptions = [
   { id: "homework_conflict", label: "Homework conflict" },
@@ -1565,8 +1588,9 @@ function parseTranscriptLines(raw: string): Array<{ speaker: string; text: strin
 }
 
 function RecordScreen() {
-  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
-  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const childOptions = getChildOptions();
+  const [selectedChildId, setSelectedChildId] = useState(() => getChildOptions()[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>(() => getDefaultSituation() as typeof situationOptions[number]["id"]);
   const [conversationLanguage, setConversationLanguage] = useState<SupportedLanguage>("en-IN");
   const [isRecording, setIsRecording] = useState(false);
   const [sessionNote, setSessionNote] = useState("");
@@ -1757,9 +1781,10 @@ function RecordScreen() {
 }
 
 function UploadAudioScreen() {
+  const childOptions = getChildOptions();
   const [fileMeta, setFileMeta] = useState<{ name: string; sizeLabel: string; sizeBytes: number; type: string } | null>(null);
-  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
-  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const [selectedChildId, setSelectedChildId] = useState(() => getChildOptions()[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>(() => getDefaultSituation() as typeof situationOptions[number]["id"]);
   const [conversationLanguage, setConversationLanguage] = useState<SupportedLanguage>("en-IN");
   const [uploadRequested, setUploadRequested] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1891,9 +1916,10 @@ function UploadAudioScreen() {
 }
 
 function UploadTranscriptScreen() {
+  const childOptions = getChildOptions();
   const sampleTranscript = "Parent: Why did you not finish homework?\nChild: I don't want to do it.";
-  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
-  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>("homework_conflict");
+  const [selectedChildId, setSelectedChildId] = useState(() => getChildOptions()[0]?.id ?? "child_demo_1");
+  const [selectedSituation, setSelectedSituation] = useState<typeof situationOptions[number]["id"]>(() => getDefaultSituation() as typeof situationOptions[number]["id"]);
   const [transcriptLanguage, setTranscriptLanguage] = useState<SupportedLanguage>("en-IN");
   const [recommendationLanguage, setRecommendationLanguage] = useState<SupportedLanguage>("hi-IN");
   const [transcriptText, setTranscriptText] = useState(sampleTranscript);
@@ -2322,7 +2348,8 @@ function HistoryScreen() {
 }
 
 function TrendsScreen() {
-  const [selectedChildId, setSelectedChildId] = useState(childOptions[0]?.id ?? "child_demo_1");
+  const childOptions = getChildOptions();
+  const [selectedChildId, setSelectedChildId] = useState(() => getChildOptions()[0]?.id ?? "child_demo_1");
   const [trendPoints, setTrendPoints] = useState<LongitudinalTrendPoint[]>(longitudinalTrendPoints);
   const [insights, setInsights] = useState<Array<{ title: string; type: string; explanation: string; recommendedNextStep: string }>>([]);
   const [loading, setLoading] = useState(true);
