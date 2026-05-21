@@ -111,7 +111,7 @@ jobs:
             --cpu=1
             --cpu-throttling
             --no-cpu-boost
-            --set-env-vars=NODE_ENV=production,STORAGE_PROVIDER=firebase,REQUIRE_AUTH=true,DISABLE_REAL_AI=true,USE_MOCK_TRANSCRIPTION=true,USE_GEMINI_ANALYSIS=false,USE_RULE_BASED_ANALYSIS=true,STORE_RAW_AUDIO=false,ENABLE_LIVE_COACH=false,LOG_LEVEL=info
+            --set-env-vars=NODE_ENV=production,GOOGLE_CLOUD_PROJECT=${{ env.GCP_PROJECT_ID }},STORAGE_PROVIDER=firebase,REQUIRE_AUTH=true,DISABLE_REAL_AI=true,USE_MOCK_TRANSCRIPTION=true,USE_GEMINI_ANALYSIS=false,USE_RULE_BASED_ANALYSIS=true,STORE_RAW_AUDIO=false,ENABLE_LIVE_COACH=false,LOG_LEVEL=info
             ${{ vars.CLOUD_RUN_EXTRA_ARGS }}
 
       - name: Show Service URL
